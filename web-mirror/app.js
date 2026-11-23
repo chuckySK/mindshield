@@ -5,12 +5,12 @@ import {
 import {
   DOMAIN_META,
   NODES,
+  TEST_PRESETS,
   getTotalNodeCount,
   rankDomains,
   resolveNextNodeId
 } from "./dialogue-engine.js";
 
-// Key FACS-mapped blendshapes for microexpression arousal detection
 const TRACKED_SHAPES = [
   { key: "browDownLeft", label: "Zvraštenie obočia (L)" },
   { key: "browDownRight", label: "Zvraštenie obočia (P)" },
@@ -22,11 +22,18 @@ const TRACKED_SHAPES = [
   { key: "jawOpen", label: "Napätie čeľuste" }
 ];
 
+// Framing & stability constants
+const CAL_DURATION_MS = 10000;
+const FACE_LOSS_GRACE_MS = 280;
+const REPOSITION_SETTLE_MS = 450;
+const RPPG_WINDOW_MS = 12000;
+
 // DOM elements
 const video = document.getElementById("webcam");
 const overlay = document.getElementById("overlay");
 const ctx = overlay.getContext("2d");
 const statusPill = document.getElementById("statusPill");
+const framingPill = document.getElementById("framingPill");
 const debugLog = document.getElementById("debugLog");
 const blendshapeBars = document.getElementById("blendshapeBars");
 
@@ -34,6 +41,9 @@ const btnStartCam = document.getElementById("btnStartCam");
 const btnToggleCam = document.getElementById("btnToggleCam");
 const btnCalibrate = document.getElementById("btnCalibrate");
 const btnSkipCam = document.getElementById("btnSkipCam");
+const btnCancelCal = document.getElementById("btnCancelCal");
+const btnStartTest = document.getElementById("btnStartTest");
+const btnRecalibrate = document.getElementById("btnRecalibrate");
 
 const mFps = document.getElementById("mFps");
 const mLight = document.getElementById("mLight");
@@ -41,10 +51,24 @@ const mBaseline = document.getElementById("mBaseline");
 const mZscore = document.getElementById("mZscore");
 const mBpm = document.getElementById("mBpm");
 
+const calFramingWarn = document.getElementById("calFramingWarn");
+const readyCalBadge = document.getElementById("readyCalBadge");
+const readyFaceBadge = document.getElementById("readyFaceBadge");
+const presetList = document.getElementById("presetList");
+const chkPauseOnReposition = document.getElementById("chkPauseOnReposition");
+
+const qFramingBanner = document.getElementById("qFramingBanner");
 const oracleWhisper = document.getElementById("oracleWhisper");
 const oracleWhisperText = document.getElementById("oracleWhisperText");
 
-// Runtime state
+// Floating PiP HUD elements
+const pipHud = document.getElementById("pipHud");
+const pipLabel = document.getElementById("pipLabel");
+const btnPipMode = document.getElementById("btnPipMode");
+const pipCanvas = document.getElementById("pipCanvas");
+const pipCtx = pipCanvas.getContext("2d");
+
+// Runtime vision state
 let faceLandmarker = null;
 let stream = null;
 let facingMode = "user";
@@ -53,11 +77,23 @@ let rafId = null;
 let lastVideoTime = -1;
 let frameCount = 0;
 let lastFpsStamp = performance.now();
+let pipCompact = false;
 
-// Baseline & Telemetry buffers
+// Framing & Repositioning state
+let framingStatus = {
+  code: "offline", // offline | ok | edge | too_close | too_far | missing
+  label: "Kamera vypnutá",
+  cssClass: "state-offline",
+  bbox: null
+};
+let lastFaceSeenAtMs = 0;
+let settleUntilMs = 0;
+let wasOutOfFrame = false;
+
+// Calibration state (accumulates ONLY valid in-frame milliseconds)
 let calibrating = false;
-let calStartMs = 0;
-const CAL_DURATION_MS = 10000;
+let calValidMs = 0;
+let calLastTickMs = 0;
 const calSamples = {};
 let baselineStats = null;
 
@@ -65,9 +101,9 @@ let baselineStats = null;
 const rppgCanvas = document.createElement("canvas");
 const rppgCtx = rppgCanvas.getContext("2d", { willReadFrequently: true });
 let rppgBuffer = [];
-const RPPG_WINDOW_MS = 12000;
 
 // Interactive Dialogue State
+let activePresetId = "quick_mirror";
 let sessionData = createEmptySession();
 let visitedIds = new Set();
 let domainScores = createEmptyDomainScores();
@@ -76,7 +112,10 @@ let maxSteps = 8;
 let currentStep = 0;
 let currentNodeId = "n01_entry";
 let qDisplayedAtMs = 0;
+let qLastTimerTickMs = 0;
+let qRepositionMs = 0;
 let qTimerInterval = null;
+let currentTier = "tier1_web_mediapipe";
 
 function createEmptyDomainScores() {
   return {
@@ -91,16 +130,18 @@ function createEmptySession() {
   return {
     session_id: `mirror_${Date.now()}`,
     created_at_ms: Date.now(),
-    tier: "tier1_web_mediapipe",
+    tier: currentTier,
     camera_facing: facingMode,
-    baseline_calibrated: false,
+    baseline_calibrated: Boolean(baselineStats),
     questions: [],
     microexpression_spikes: [],
     rppg_estimates: [],
     meta: {
-      engine_version: "2.0.0",
+      engine_version: "3.0.0",
       total_graph_nodes: getTotalNodeCount(),
-      selected_depth: maxSteps
+      preset_id: activePresetId,
+      selected_depth: maxSteps,
+      pause_on_reposition: chkPauseOnReposition ? chkPauseOnReposition.checked : true
     }
   };
 }
@@ -121,11 +162,20 @@ function log(msg) {
 function showStage(id) {
   document.querySelectorAll(".stage").forEach((el) => el.classList.remove("active"));
   document.getElementById(id).classList.add("active");
+  updatePipVisibility();
 }
 
-function getSelectedDepth() {
-  const checked = document.querySelector('input[name="sessionDepth"]:checked');
-  return checked ? Number(checked.value) : 8;
+function updatePipVisibility() {
+  const inTestOrReady =
+    document.getElementById("stageReady").classList.contains("active") ||
+    document.getElementById("stageQuestion").classList.contains("active") ||
+    document.getElementById("stageCalibration").classList.contains("active");
+
+  if (running && inTestOrReady) {
+    pipHud.classList.remove("hidden");
+  } else {
+    pipHud.classList.add("hidden");
+  }
 }
 
 function initBars() {
@@ -140,6 +190,107 @@ function initBars() {
     `;
     blendshapeBars.appendChild(row);
   }
+}
+
+function initPresets() {
+  presetList.innerHTML = "";
+  const presets = Object.values(TEST_PRESETS);
+  presets.forEach((p, idx) => {
+    const label = document.createElement("label");
+    label.className = "radio-card";
+    label.innerHTML = `
+      <input type="radio" name="testPreset" value="${escapeHtml(p.id)}" ${idx === 0 ? "checked" : ""} />
+      <div>
+        <strong>${escapeHtml(p.title)}</strong>
+        <span>${escapeHtml(p.description)}</span>
+      </div>
+    `;
+    presetList.appendChild(label);
+  });
+}
+
+function getSelectedPreset() {
+  const checked = document.querySelector('input[name="testPreset"]:checked');
+  const id = checked ? checked.value : "quick_mirror";
+  return TEST_PRESETS[id] || TEST_PRESETS.quick_mirror;
+}
+
+function setFramingStatus(code, label, cssClass, bbox = null) {
+  framingStatus = { code, label, cssClass, bbox };
+
+  framingPill.textContent = `Záber: ${label}`;
+  framingPill.className = "pill framing-pill " + (
+    code === "ok" ? "online" : code === "missing" ? "danger" : code === "offline" ? "offline" : "warn"
+  );
+
+  pipHud.classList.remove("state-offline", "state-ok", "state-warn", "state-missing");
+  pipHud.classList.add(cssClass);
+  pipLabel.textContent = label;
+
+  if (document.getElementById("stageReady").classList.contains("active")) {
+    if (!running) {
+      readyFaceBadge.textContent = "Režim bez kamery";
+      readyFaceBadge.className = "mono";
+    } else if (code === "ok") {
+      readyFaceBadge.textContent = "Poloha tváre: OK (pripravené na štart)";
+      readyFaceBadge.className = "mono text-ok";
+    } else {
+      readyFaceBadge.textContent = `Poloha tváre: ${label}`;
+      readyFaceBadge.className = "mono text-warn";
+    }
+  }
+}
+
+function evaluateFaceFraming(landmarks, nowEpoch) {
+  if (!landmarks || landmarks.length === 0) {
+    if (nowEpoch - lastFaceSeenAtMs > FACE_LOSS_GRACE_MS) {
+      wasOutOfFrame = true;
+      setFramingStatus("missing", "Tvár mimo záberu", "state-missing", null);
+    }
+    return;
+  }
+
+  lastFaceSeenAtMs = nowEpoch;
+  let minX = 1, minY = 1, maxX = 0, maxY = 0;
+  for (let i = 0; i < landmarks.length; i++) {
+    const p = landmarks[i];
+    if (p.x < minX) minX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y > maxY) maxY = p.y;
+  }
+
+  const width = maxX - minX;
+  const height = maxY - minY;
+  const bbox = { minX, minY, maxX, maxY, width, height };
+
+  const inBounds = minX >= 0.03 && maxX <= 0.97 && minY >= 0.03 && maxY <= 0.97;
+  if (!inBounds) {
+    wasOutOfFrame = true;
+    setFramingStatus("edge", "Posuň tvár do stredu", "state-warn", bbox);
+    return;
+  }
+  if (width > 0.80 || height > 0.90) {
+    wasOutOfFrame = true;
+    setFramingStatus("too_close", "Príliš blízko", "state-warn", bbox);
+    return;
+  }
+  if (width < 0.14) {
+    wasOutOfFrame = true;
+    setFramingStatus("too_far", "Príliš ďaleko", "state-warn", bbox);
+    return;
+  }
+
+  if (wasOutOfFrame) {
+    wasOutOfFrame = false;
+    settleUntilMs = nowEpoch + REPOSITION_SETTLE_MS;
+  }
+  setFramingStatus("ok", "Tvár OK", "state-ok", bbox);
+}
+
+function isRepositioningNow(nowEpoch) {
+  if (!running) return false;
+  return framingStatus.code !== "ok" || nowEpoch < settleUntilMs;
 }
 
 async function initMediaPipe() {
@@ -169,8 +320,6 @@ async function startCamera() {
 
     await initMediaPipe();
 
-    // Front camera uses lighter 640x480 to maximize mobile FPS & reduce low-light shutter drag.
-    // Rear camera uses 1280x720 for superior optics and observer-mode accuracy.
     const isFront = facingMode === "user";
     const constraints = {
       audio: false,
@@ -186,8 +335,13 @@ async function startCamera() {
     video.srcObject = stream;
     await video.play();
 
+    // Mirror preview for intuitive self-framing on front camera
+    video.classList.toggle("mirrored", isFront);
+    overlay.classList.toggle("mirrored", isFront);
+
     lastVideoTime = -1;
     rppgBuffer = [];
+    lastFaceSeenAtMs = Date.now();
 
     const trackSettings = stream.getVideoTracks()[0].getSettings();
     log(
@@ -205,12 +359,14 @@ async function startCamera() {
     btnToggleCam.disabled = false;
     btnCalibrate.disabled = false;
     btnStartCam.textContent = "Zastaviť kameru";
+    updatePipVisibility();
 
     processLoop();
   } catch (err) {
     log(`CHYBA kamery/MediaPipe: ${err.message}`);
     statusPill.textContent = "Chyba kamery";
     statusPill.className = "pill offline";
+    setFramingStatus("offline", "Kamera vypnutá", "state-offline", null);
   }
 }
 
@@ -227,9 +383,85 @@ function stopCamera() {
   ctx.clearRect(0, 0, overlay.width, overlay.height);
   statusPill.textContent = "Kamera vypnutá";
   statusPill.className = "pill offline";
+  setFramingStatus("offline", "Kamera vypnutá", "state-offline", null);
   mLight.textContent = "--";
   mLight.className = "";
   btnStartCam.textContent = "Spustiť kameru a MediaPipe";
+  updatePipVisibility();
+}
+
+function drawOverlays(landmarks) {
+  ctx.clearRect(0, 0, overlay.width, overlay.height);
+
+  // Subtle target framing guide on main canvas
+  ctx.strokeStyle = "rgba(148, 163, 184, 0.35)";
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([6, 6]);
+  ctx.strokeRect(
+    overlay.width * 0.14,
+    overlay.height * 0.08,
+    overlay.width * 0.72,
+    overlay.height * 0.84
+  );
+  ctx.setLineDash([]);
+
+  const boxColor =
+    framingStatus.code === "ok" ? "#22c55e" : framingStatus.code === "missing" ? "#f43f5e" : "#f59e0b";
+
+  if (framingStatus.bbox) {
+    const b = framingStatus.bbox;
+    ctx.strokeStyle = boxColor;
+    ctx.lineWidth = 2.5;
+    ctx.strokeRect(
+      b.minX * overlay.width,
+      b.minY * overlay.height,
+      b.width * overlay.width,
+      b.height * overlay.height
+    );
+  }
+
+  if (landmarks && landmarks.length > 151) {
+    const forehead = landmarks[151];
+    ctx.strokeStyle = "#38bdf8";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(
+      forehead.x * overlay.width - 18,
+      forehead.y * overlay.height - 14,
+      36,
+      28
+    );
+  }
+
+  // Draw floating PiP mini-window (only when visible and not compact)
+  if (!pipHud.classList.contains("hidden") && !pipCompact && video.readyState >= 2) {
+    const pw = pipCanvas.width;
+    const ph = pipCanvas.height;
+    const isFront = facingMode === "user";
+
+    pipCtx.save();
+    pipCtx.clearRect(0, 0, pw, ph);
+    if (isFront) {
+      pipCtx.translate(pw, 0);
+      pipCtx.scale(-1, 1);
+    }
+    pipCtx.drawImage(video, 0, 0, pw, ph);
+
+    // Oval center guide
+    pipCtx.strokeStyle = "rgba(255, 255, 255, 0.35)";
+    pipCtx.lineWidth = 1;
+    pipCtx.beginPath();
+    pipCtx.ellipse(pw / 2, ph / 2, pw * 0.28, ph * 0.38, 0, 0, Math.PI * 2);
+    pipCtx.stroke();
+
+    // Detected face box
+    if (framingStatus.bbox) {
+      const b = framingStatus.bbox;
+      pipCtx.strokeStyle = boxColor;
+      pipCtx.lineWidth = 2;
+      pipCtx.strokeRect(b.minX * pw, b.minY * ph, b.width * pw, b.height * ph);
+    }
+    pipCtx.restore();
+  }
 }
 
 function extractForeheadRppgAndLight(landmarks, nowMs) {
@@ -271,6 +503,8 @@ function extractForeheadRppgAndLight(landmarks, nowMs) {
       mLight.className = "text-ok";
     }
   }
+
+  if (framingStatus.code !== "ok") return;
 
   rppgBuffer.push({ t: nowMs, g: gMean });
   while (rppgBuffer.length > 0 && nowMs - rppgBuffer[0].t > RPPG_WINDOW_MS) {
@@ -333,19 +567,12 @@ function processLoop() {
   if (video.currentTime !== lastVideoTime && faceLandmarker) {
     lastVideoTime = video.currentTime;
     const result = faceLandmarker.detectForVideo(video, nowPerf);
-    ctx.clearRect(0, 0, overlay.width, overlay.height);
+    const lm = result.faceLandmarks && result.faceLandmarks.length > 0 ? result.faceLandmarks[0] : null;
 
-    if (result.faceLandmarks && result.faceLandmarks.length > 0) {
-      const lm = result.faceLandmarks[0];
-      const forehead = lm[151];
-      ctx.strokeStyle = "#38bdf8";
-      ctx.lineWidth = 2;
-      ctx.strokeRect(
-        forehead.x * overlay.width - 18,
-        forehead.y * overlay.height - 14,
-        36,
-        28
-      );
+    evaluateFaceFraming(lm, nowEpoch);
+    drawOverlays(lm);
+
+    if (lm) {
       extractForeheadRppgAndLight(lm, nowPerf);
     }
 
@@ -353,6 +580,9 @@ function processLoop() {
       const categories = result.faceBlendshapes[0].categories;
       const map = Object.fromEntries(categories.map((c) => [c.categoryName, c.score]));
       handleBlendshapes(map, nowEpoch);
+    } else if (calibrating) {
+      calFramingWarn.classList.remove("hidden");
+      calLastTickMs = nowEpoch;
     }
   }
 
@@ -360,16 +590,27 @@ function processLoop() {
 }
 
 function handleBlendshapes(map, nowEpoch) {
-  if (calibrating) {
-    const elapsed = nowEpoch - calStartMs;
-    const pct = Math.min(100, (elapsed / CAL_DURATION_MS) * 100);
-    document.getElementById("calProgress").style.width = `${pct}%`;
-    document.getElementById("calCounter").textContent = `${(elapsed / 1000).toFixed(1)} / 10.0 s`;
+  const stableFrame = framingStatus.code === "ok" && nowEpoch >= settleUntilMs;
 
-    for (const s of TRACKED_SHAPES) {
-      calSamples[s.key].push(map[s.key] || 0);
+  if (calibrating) {
+    const dt = Math.min(250, Math.max(0, nowEpoch - calLastTickMs));
+    calLastTickMs = nowEpoch;
+
+    if (stableFrame) {
+      calFramingWarn.classList.add("hidden");
+      calValidMs += dt;
+      for (const s of TRACKED_SHAPES) {
+        calSamples[s.key].push(map[s.key] || 0);
+      }
+    } else {
+      calFramingWarn.classList.remove("hidden");
     }
-    if (elapsed >= CAL_DURATION_MS) {
+
+    const pct = Math.min(100, (calValidMs / CAL_DURATION_MS) * 100);
+    document.getElementById("calProgress").style.width = `${pct}%`;
+    document.getElementById("calCounter").textContent = `${(calValidMs / 1000).toFixed(1)} / 10.0 s`;
+
+    if (calValidMs >= CAL_DURATION_MS) {
       finishCalibration();
     }
   }
@@ -387,7 +628,7 @@ function handleBlendshapes(map, nowEpoch) {
       const z = (val - mean) / Math.max(std, 0.015);
       const clampedPct = Math.min(100, Math.max(0, (Math.abs(z) / 5) * 100));
       bar.style.width = `${clampedPct}%`;
-      bar.classList.toggle("spike", z >= 2.2);
+      bar.classList.toggle("spike", stableFrame && z >= 2.2);
       valEl.textContent = `${z.toFixed(1)}σ`;
 
       if (z > maxZ) {
@@ -403,8 +644,10 @@ function handleBlendshapes(map, nowEpoch) {
 
   mZscore.textContent = `${maxZ.toFixed(2)} σ`;
 
+  // Gate FACS spike capture: ignore spikes during out-of-frame / 450ms settle window
   if (
     baselineStats &&
+    stableFrame &&
     document.getElementById("stageQuestion").classList.contains("active") &&
     maxZ >= 2.2
   ) {
@@ -420,28 +663,16 @@ function handleBlendshapes(map, nowEpoch) {
   }
 }
 
-function resetDialogueState(tierName) {
-  maxSteps = getSelectedDepth();
-  sessionData = createEmptySession();
-  sessionData.tier = tierName;
-  sessionData.meta.selected_depth = maxSteps;
-  visitedIds = new Set();
-  domainScores = createEmptyDomainScores();
-  auditTrail = [];
-  currentStep = 0;
-  currentNodeId = "n01_entry";
-  oracleWhisper.classList.add("hidden");
-  oracleWhisperText.textContent = "";
-}
-
 function startCalibration() {
-  resetDialogueState("tier1_web_mediapipe");
+  currentTier = "tier1_web_mediapipe";
   for (const s of TRACKED_SHAPES) calSamples[s.key] = [];
   calibrating = true;
-  calStartMs = Date.now();
+  calValidMs = 0;
+  calLastTickMs = Date.now();
   mBaseline.textContent = "Baseline: Prebieha...";
+  calFramingWarn.classList.add("hidden");
   showStage("stageCalibration");
-  log("Spustená 10s Baseline kalibrácia.");
+  log("Spustená 10s Baseline kalibrácia (zber len pri stabilnom zábere tváre).");
 }
 
 function finishCalibration() {
@@ -453,19 +684,49 @@ function finishCalibration() {
     const variance = arr.reduce((a, b) => a + (b - mean) ** 2, 0) / Math.max(arr.length, 1);
     baselineStats[s.key] = { mean, std: Math.sqrt(variance) };
   }
-  sessionData.baseline_calibrated = true;
   mBaseline.textContent = "Baseline: Hotová";
-  log("Kalibrácia hotová. Spúšťam adaptívny 30-uzlový graf.");
-  startQuestions();
+  log("Kalibrácia dokončená. Čakám na výber testu a manuálny ŠTART.");
+  openReadyStage(true);
 }
 
-function startQuestions() {
+function openReadyStage(withCamera) {
+  currentTier = withCamera && running ? "tier1_web_mediapipe" : "tier0_text_latency_only";
+  if (withCamera && baselineStats) {
+    readyCalBadge.textContent = "Baseline kalibrácia: HOTOVÁ";
+    btnRecalibrate.classList.remove("hidden");
+  } else {
+    readyCalBadge.textContent = "Režim bez kamery (latencia + psychológia)";
+    btnRecalibrate.classList.add("hidden");
+  }
+  showStage("stageReady");
+  setFramingStatus(framingStatus.code, framingStatus.label, framingStatus.cssClass, framingStatus.bbox);
+}
+
+function startSelectedTest() {
+  const preset = getSelectedPreset();
+  activePresetId = preset.id;
+  maxSteps = preset.maxSteps;
+  sessionData = createEmptySession();
+  sessionData.tier = running && baselineStats ? "tier1_web_mediapipe" : "tier0_text_latency_only";
+  sessionData.baseline_calibrated = Boolean(baselineStats && running);
+  sessionData.meta.preset_id = preset.id;
+  sessionData.meta.selected_depth = preset.maxSteps;
+  sessionData.meta.pause_on_reposition = chkPauseOnReposition.checked;
+
+  visitedIds = new Set();
+  domainScores = { ...preset.initialDomainScores };
+  auditTrail = [];
+  currentStep = 0;
+  currentNodeId = preset.startNodeId;
+  oracleWhisper.classList.add("hidden");
+  oracleWhisperText.textContent = "";
+
+  log(`ŠTART testu "${preset.title}" (${preset.maxSteps} krokov, štart=${preset.startNodeId}).`);
   showStage("stageQuestion");
   renderNode(currentNodeId, null);
 }
 
 function findStrongestBiometricEvent() {
-  // Prioritize FACS microexpression spike; fall back to clearest latency outlier
   if (sessionData.microexpression_spikes.length > 0) {
     const topSpike = [...sessionData.microexpression_spikes].sort((a, b) => b.z_score - a.z_score)[0];
     return {
@@ -531,11 +792,37 @@ function renderNode(nodeId, previousReaction) {
 
   const optsEl = document.getElementById("qOptions");
   optsEl.innerHTML = "";
+
   qDisplayedAtMs = Date.now();
+  qLastTimerTickMs = qDisplayedAtMs;
+  qRepositionMs = 0;
 
   if (qTimerInterval) clearInterval(qTimerInterval);
   qTimerInterval = setInterval(() => {
-    document.getElementById("qTimer").textContent = `${Date.now() - qDisplayedAtMs} ms`;
+    const now = Date.now();
+    const dt = now - qLastTimerTickMs;
+    qLastTimerTickMs = now;
+
+    const pauseEnabled = chkPauseOnReposition.checked;
+    const reposNow = isRepositioningNow(now);
+
+    if (reposNow) {
+      qRepositionMs += dt;
+    }
+
+    qFramingBanner.classList.toggle("hidden", !(running && reposNow));
+
+    const rawElapsed = now - qDisplayedAtMs;
+    const cleanElapsed = pauseEnabled ? Math.max(0, Math.round(rawElapsed - qRepositionMs)) : rawElapsed;
+
+    const qTimerEl = document.getElementById("qTimer");
+    if (running && reposNow && pauseEnabled) {
+      qTimerEl.textContent = `${cleanElapsed} ms (pozastavené)`;
+      qTimerEl.className = "mono text-warn";
+    } else {
+      qTimerEl.textContent = `${cleanElapsed} ms`;
+      qTimerEl.className = "mono";
+    }
   }, 50);
 
   for (const opt of node.options) {
@@ -549,7 +836,10 @@ function renderNode(nodeId, previousReaction) {
 
 function selectAnswer(node, opt) {
   const answeredAtMs = Date.now();
-  const latencyMs = answeredAtMs - qDisplayedAtMs;
+  const rawLatencyMs = answeredAtMs - qDisplayedAtMs;
+  const repoMs = Math.round(qRepositionMs);
+  const pauseEnabled = chkPauseOnReposition.checked;
+  const effectiveLatencyMs = pauseEnabled ? Math.max(0, rawLatencyMs - repoMs) : rawLatencyMs;
 
   if (opt.domainBoost) {
     for (const [dom, weight] of Object.entries(opt.domainBoost)) {
@@ -561,7 +851,9 @@ function selectAnswer(node, opt) {
     question_id: node.id,
     displayed_at_ms: qDisplayedAtMs,
     answered_at_ms: answeredAtMs,
-    latency_ms: latencyMs,
+    latency_ms: effectiveLatencyMs,
+    raw_latency_ms: rawLatencyMs,
+    reposition_ms: repoMs,
     answer_code: opt.code,
     trait: opt.trait
   });
@@ -571,13 +863,16 @@ function selectAnswer(node, opt) {
     question_id: node.id,
     question_text: node.text,
     chosen_label: opt.label,
-    latency_ms: latencyMs,
+    latency_ms: effectiveLatencyMs,
+    reposition_ms: repoMs,
     oracle_reaction: opt.oracleReaction,
     technique: opt.technique,
     debunk: opt.debunkExplanation
   });
 
-  log(`Krok ${currentStep} [${node.id}] -> ${opt.code} (${latencyMs} ms) | ${opt.technique}`);
+  log(
+    `Krok ${currentStep} [${node.id}] -> ${opt.code} (čistý ${effectiveLatencyMs} ms, úprava polohy ${repoMs} ms)`
+  );
 
   const nextId = resolveNextNodeId({
     currentOption: opt,
@@ -597,6 +892,7 @@ function selectAnswer(node, opt) {
 
 function finishSession() {
   if (qTimerInterval) clearInterval(qTimerInterval);
+  qFramingBanner.classList.add("hidden");
   const { primary, secondary } = rankDomains(domainScores);
   sessionData.meta.primary_domain = primary;
   sessionData.meta.secondary_domain = secondary;
@@ -612,10 +908,10 @@ function buildResults(primaryKey, secondaryKey) {
   const avgLatency = Math.round(
     sessionData.questions.reduce((a, b) => a + b.latency_ms, 0) / Math.max(sessionData.questions.length, 1)
   );
+  const totalRepoMs = sessionData.questions.reduce((a, b) => a + (b.reposition_ms || 0), 0);
   const slowest = [...sessionData.questions].sort((a, b) => b.latency_ms - a.latency_ms)[0];
   const bioEvent = findStrongestBiometricEvent();
 
-  // 1. Rezim Vestec (Personalizovana synteza)
   const oracleHtml = [
     `<h3>Tvoja osobná veštba (Ilúzia)</h3>`,
     `<p class="oracle-quote">„Keď som spojil všetky tvoje signály, obraz sa úplne vyjasnil. Tvojím hlavným ohniskom v tomto období je <strong>${escapeHtml(primary.oracleTopic)}</strong>, pričom v pozadí do toho potichu zasahuje aj téma: ${escapeHtml(secondary.oracleTopic)}.“</p>`,
@@ -627,7 +923,6 @@ function buildResults(primaryKey, secondaryKey) {
   ];
   document.getElementById("resultOracle").innerHTML = oracleHtml.join("");
 
-  // 2. FLIP MODE (Kompletna pitva manipulacie + biometria)
   const spikesByQ = {};
   for (const sp of sessionData.microexpression_spikes) {
     spikesByQ[sp.question_id] = (spikesByQ[sp.question_id] || 0) + 1;
@@ -637,10 +932,11 @@ function buildResults(primaryKey, secondaryKey) {
     .map((item) => {
       const spCount = spikesByQ[item.question_id] || 0;
       const spikeBadge = spCount > 0 ? ` | FACS špičky: ${spCount}` : "";
+      const repoBadge = item.reposition_ms > 200 ? ` | mimo záber: ${item.reposition_ms} ms` : "";
       return `
         <div class="audit-item">
           <div class="audit-head">
-            <strong>Krok ${item.step} (${item.latency_ms} ms${spikeBadge})</strong>
+            <strong>Krok ${item.step} (čistý čas ${item.latency_ms} ms${repoBadge}${spikeBadge})</strong>
             <span class="tech-tag">${escapeHtml(item.technique)}</span>
           </div>
           <p class="audit-choice"><strong>Tvoja voľba:</strong> ${escapeHtml(item.chosen_label)}</p>
@@ -655,12 +951,13 @@ function buildResults(primaryKey, secondaryKey) {
     `<h3>FLIP MODE: Vedecká pitva celého rozhovoru (Žiadna mágia)</h3>`,
     `<div class="debunk-card">
       <strong>1. Ako „vedela“, že riešiš ${escapeHtml(primary.label.toLowerCase())}?</strong><br />
-      Nevytiahla to z kariet ani z energie. Už tvoje prvé kliknutie pridelilo oblasti <em>${escapeHtml(primary.label)}</em> najvyššiu váhu (skóre: <code>${JSON.stringify(domainScores)}</code>) a presmerovalo rozhovor do pripravenej vetvy z 30-uzlového scenára. Presne takto fungujú platené ezolinky za 2 € za minútu.
+      Nevytiahla to z kariet ani z energie. Tvoje kliknutia pridelili oblasti <em>${escapeHtml(primary.label)}</em> najvyššiu váhu (skóre: <code>${JSON.stringify(domainScores)}</code>) a presmerovali rozhovor do pripravenej vetvy z 30-uzlového scenára.
     </div>`,
     `<div class="debunk-card ok">
-      <strong>2. Kognitívna záťaž a biometria:</strong><br />
-      Priemerný čas odpovede: <strong>${avgLatency} ms</strong>. Najdlhšie váhanie nastalo pri kroku <code>${slowest ? slowest.question_id : "-"}</code> (<strong>${slowest ? slowest.latency_ms : 0} ms</strong>).
-      Zachytené FACS mikrovýrazy nad 2.2σ: <strong>${sessionData.microexpression_spikes.length}</strong> (<code>${JSON.stringify(spikesByQ)}</code>). Video neopustilo tvoje zariadenie.
+      <strong>2. Čistá kognitívna záťaž a biometria:</strong><br />
+      Priemerný čistý čas odpovede: <strong>${avgLatency} ms</strong> (odfiltrovaný čas úpravy polohy: <strong>${totalRepoMs} ms</strong>).
+      Najdlhšie váhanie nastalo pri kroku <code>${slowest ? slowest.question_id : "-"}</code> (<strong>${slowest ? slowest.latency_ms : 0} ms</strong>).
+      Zachytené FACS mikrovýrazy nad 2.2σ (iba pri stabilnej tvári): <strong>${sessionData.microexpression_spikes.length}</strong> (<code>${JSON.stringify(spikesByQ)}</code>). Video neopustilo tvoje zariadenie.
     </div>`,
     `<div class="debunk-card info">
       <strong>3. Psychologický náznak (Schémová terapia Jeffreyho Younga):</strong><br />
@@ -685,9 +982,27 @@ btnToggleCam.addEventListener("click", () => {
 
 btnCalibrate.addEventListener("click", startCalibration);
 
+btnCancelCal.addEventListener("click", () => {
+  calibrating = false;
+  mBaseline.textContent = baselineStats ? "Baseline: Hotová" : "Baseline: Neaktívna";
+  showStage("stageIntro");
+});
+
 btnSkipCam.addEventListener("click", () => {
-  resetDialogueState("tier0_text_latency_only");
-  startQuestions();
+  openReadyStage(false);
+});
+
+btnStartTest.addEventListener("click", startSelectedTest);
+
+btnRecalibrate.addEventListener("click", () => {
+  if (running) startCalibration();
+  else showStage("stageIntro");
+});
+
+btnPipMode.addEventListener("click", () => {
+  pipCompact = !pipCompact;
+  pipHud.classList.toggle("compact", pipCompact);
+  btnPipMode.textContent = pipCompact ? "Obraz" : "Mini";
 });
 
 document.getElementById("btnModeOracle").addEventListener("click", () => {
@@ -710,8 +1025,14 @@ document.getElementById("btnExportJson").addEventListener("click", () => {
 
 document.getElementById("btnRestart").addEventListener("click", () => {
   if (qTimerInterval) clearInterval(qTimerInterval);
+  openReadyStage(running && Boolean(baselineStats));
+});
+
+document.getElementById("btnBackIntro").addEventListener("click", () => {
+  if (qTimerInterval) clearInterval(qTimerInterval);
   showStage("stageIntro");
 });
 
 initBars();
-log(`The Mirror v2 pripravený (${getTotalNodeCount()} adaptívnych uzlov).`);
+initPresets();
+log(`The Mirror v3 pripravený (${getTotalNodeCount()} uzlov, Pre-Start obrazovka + PiP Face-Lock HUD).`);
