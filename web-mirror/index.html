@@ -3,14 +3,14 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>The Mirror — Debunk & Microexpression Lab</title>
+  <title>The Mirror v2 — Interaktívny Cold Reading & Debunk Lab</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
   <header class="topbar">
     <div class="brand">
-      <h1>THE MIRROR</h1>
-      <span class="badge">LOCAL-FIRST • ZERO VIDEO UPLOAD</span>
+      <h1>THE MIRROR <span class="ver">v2</span></h1>
+      <span class="badge">LOCAL-FIRST • 30-UZLOVÝ GRAF • ZERO VIDEO UPLOAD</span>
     </div>
     <div class="controls">
       <button id="btnToggleCam" class="btn secondary" disabled>Prepnúť kameru (Predná / Zadná)</button>
@@ -19,7 +19,7 @@
   </header>
 
   <main class="grid">
-    <!-- Left Column: Live Vision & Biometrics -->
+    <!-- Lavy stlpec: Kamera, osvetlenie a zive FACS kanaly -->
     <section class="card vision-panel">
       <div class="video-wrapper">
         <video id="webcam" autoplay playsinline muted></video>
@@ -33,8 +33,8 @@
           <strong id="mFps">0</strong>
         </div>
         <div class="metric">
-          <span class="label">Kalibrácia (Baseline)</span>
-          <strong id="mBaseline">Neaktívna</strong>
+          <span class="label">Svetlo (TVÁR)</span>
+          <strong id="mLight">--</strong>
         </div>
         <div class="metric">
           <span class="label">Max FACS Z-Score</span>
@@ -47,7 +47,10 @@
       </div>
 
       <div class="subpanel">
-        <h3>Živé FACS kanály (Odchýlka od tvojho základu)</h3>
+        <div class="subpanel-head">
+          <h3>Živé FACS kanály (Odchýlka od tvojho základu)</h3>
+          <span id="mBaseline" class="mono">Baseline: Neaktívna</span>
+        </div>
         <div id="blendshapeBars" class="bars"></div>
       </div>
 
@@ -57,50 +60,84 @@
       </div>
     </section>
 
-    <!-- Right Column: Interactive Profiling & Flip Mode -->
+    <!-- Pravy stlpec: Adaptivny rozhovor a Flip Mode pitva -->
     <section class="card session-panel">
       <div id="stageIntro" class="stage active">
-        <h2>Krok 1: Kalibrácia a Profilovanie</h2>
+        <h2>Krok 1: Interaktívne zrkadlo a Debunk</h2>
         <p>
-          Spusti kameru (prednú pre seba, zadnú pre testovanie druhej osoby).
-          Systém najskôr 10 sekúnd zmeria tvoj neutrálny výraz tváre (Baseline)
-          a následne ti položí 5 zdanlivo bežných otázok. Všetky dáta sa spracujú
-          výlučne lokálne v tvojom prehliadači.
+          Systém obsahuje <strong>30 prepojených psychologických uzlov</strong> (vzťahy, práca a financie,
+          zdravie a stres, kontrola a skepsa). Po každej odpovedi „veštica“ okamžite zareaguje na tvoju
+          voľbu a dynamicky presmeruje rozhovor — presne tak, ako to robia platené ezolinky.
+          Na konci jedným klikom prepneš na <strong>FLIP MODE</strong> a uvidíš presnú pitvu každého triku.
         </p>
+
+        <div class="depth-picker">
+          <label class="depth-label">Dĺžka interaktívneho rozhovoru:</label>
+          <div class="depth-options">
+            <label class="radio-card">
+              <input type="radio" name="sessionDepth" value="8" checked />
+              <div>
+                <strong>Rýchle zrkadlo (8 krokov)</strong>
+                <span>Ideálne na mobil a rýchlu ukážku (cca 2 min)</span>
+              </div>
+            </label>
+            <label class="radio-card">
+              <input type="radio" name="sessionDepth" value="12" />
+              <div>
+                <strong>Hlboký rozbor (12 krokov)</strong>
+                <span>Prejde hlavnú aj vedľajšiu vetvu + biometrický háčik (cca 4 min)</span>
+              </div>
+            </label>
+          </div>
+        </div>
+
+        <p class="hint">
+          Tip pre mobil: Predná kamera vyžaduje dobré čelné svetlo (pre nižšie zaťaženie beží v 480p).
+          Pre najvyššie FPS a testovanie druhej osoby prepni na <strong>Zadnú kameru</strong>.
+        </p>
+
         <div class="actions">
-          <button id="btnCalibrate" class="btn primary" disabled>Spustiť 10s kalibráciu</button>
-          <button id="btnSkipCam" class="btn secondary">Testovať bez kamery (len latencia a text)</button>
+          <button id="btnCalibrate" class="btn primary" disabled>Spustiť 10s kalibráciu tváre</button>
+          <button id="btnSkipCam" class="btn secondary">Spustiť bez kamery (len latencia a psychológia)</button>
         </div>
       </div>
 
       <div id="stageCalibration" class="stage">
         <h2>Kalibrácia neutrálneho výrazu</h2>
-        <p>Pozeraj sa pokojne do kamery, uvoľni tvár a nehovor. Zbieram tvoj základný vektor.</p>
+        <p>Pozeraj sa pokojne do kamery, uvoľni tvár a nehovor. Zbieram tvoj základný vektor mikrovýrazov.</p>
         <div class="progress-track"><div id="calProgress" class="progress-fill"></div></div>
-        <p id="calCounter" class="mono">0 / 10 s</p>
+        <p id="calCounter" class="mono">0.0 / 10.0 s</p>
       </div>
 
       <div id="stageQuestion" class="stage">
         <div class="q-header">
-          <span id="qStep" class="badge">OTÁZKA 1 / 5</span>
+          <span id="qStep" class="badge">KROK 1 / 8</span>
+          <span id="qDomainTag" class="domain-pill">Otvorenie</span>
           <span id="qTimer" class="mono">0 ms</span>
         </div>
+
+        <!-- Ziva reakcia vestice na predchadzajucu odpoved -->
+        <div id="oracleWhisper" class="oracle-whisper hidden">
+          <div class="whisper-label">Reakcia veštice (Cold Reading v reálnom čase)</div>
+          <p id="oracleWhisperText"></p>
+        </div>
+
         <h2 id="qText">Načítavam otázku...</h2>
         <div id="qOptions" class="options"></div>
       </div>
 
       <div id="stageResult" class="stage">
         <div class="mode-switch">
-          <button id="btnModeOracle" class="btn primary">Režim Veštec (Ilúzia)</button>
-          <button id="btnModeDebunk" class="btn danger">FLIP MODE: Odhaľ mechanizmus</button>
-          <button id="btnExportJson" class="btn secondary">Exportovať JSON pre Backend</button>
+          <button id="btnModeOracle" class="btn primary">1. Režim Veštec (Ilúzia)</button>
+          <button id="btnModeDebunk" class="btn danger">2. FLIP MODE: Pitva trikov</button>
+          <button id="btnExportJson" class="btn secondary">Exportovať JSON</button>
         </div>
 
         <div id="resultOracle" class="result-box"></div>
         <div id="resultDebunk" class="result-box hidden"></div>
 
         <div class="actions">
-          <button id="btnRestart" class="btn secondary">Nové sedenie</button>
+          <button id="btnRestart" class="btn secondary">Spustiť nové sedenie (iná vetva)</button>
         </div>
       </div>
     </section>

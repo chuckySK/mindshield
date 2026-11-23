@@ -2,6 +2,13 @@ import {
   FaceLandmarker,
   FilesetResolver
 } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+import {
+  DOMAIN_META,
+  NODES,
+  getTotalNodeCount,
+  rankDomains,
+  resolveNextNodeId
+} from "./dialogue-engine.js";
 
 // Key FACS-mapped blendshapes for microexpression arousal detection
 const TRACKED_SHAPES = [
@@ -13,54 +20,6 @@ const TRACKED_SHAPES = [
   { key: "mouthSmileLeft", label: "Úsmev (L)" },
   { key: "mouthSmileRight", label: "Úsmev (P)" },
   { key: "jawOpen", label: "Napätie čeľuste" }
-];
-
-const QUESTIONS = [
-  {
-    id: "q1",
-    text: "Keď prídeš do nového prostredia alebo riešiš zložitý problém, čo urobíš ako prvé?",
-    options: [
-      { code: "A", label: "Preberiem kontrolu a nastavím pravidlá, irituje ma chaos.", trait: "control" },
-      { code: "B", label: "Pozorujem systém v tichosti a až potom urobím presný ťah.", trait: "observer" },
-      { code: "C", label: "Uvoľním atmosféru a najprv nadviažem ľudský kontakt.", trait: "connector" }
-    ]
-  },
-  {
-    id: "q2",
-    text: "Čo ťa dokáže najviac vnútorne vytočiť na blízkych ľuďoch?",
-    options: [
-      { code: "A", label: "Pretvárka, povrchnosť a klamstvo do očí.", trait: "authenticity" },
-      { code: "B", label: "Neschopnosť rozhodnúť sa a prenášanie zodpovednosti na mňa.", trait: "burden" },
-      { code: "C", label: "Nelojalita v momente, keď potrebujem oporu.", trait: "loyalty" }
-    ]
-  },
-  {
-    id: "q3",
-    text: "Čo robíš, keď prežívaš silný vnútorný stres alebo obavu?",
-    options: [
-      { code: "A", label: "Uzavriem sa, rozoberiem to racionálne a vyriešim sám.", trait: "isolate" },
-      { code: "B", label: "Ponorím sa do práce alebo projektov, aby som nad tým nepremýšľal.", trait: "workaholism" },
-      { code: "C", label: "Potrebujem to vyrozprávať jednému človeku, ktorému verím.", trait: "confide" }
-    ]
-  },
-  {
-    id: "q4",
-    text: "Ktorý vnútorný motor ťa ženie dopredu najsilnejšie?",
-    options: [
-      { code: "A", label: "Rozumieť veciam pod povrchom, aby ma nikto neoklamal.", trait: "vigilance" },
-      { code: "B", label: "Vybudovať bezpečné a pevné zázemie pre seba a rodinu.", trait: "security" },
-      { code: "C", label: "Sloboda rozhodovania bez cudzieho diktátu.", trait: "autonomy" }
-    ]
-  },
-  {
-    id: "q5",
-    text: "Ktorá vec z minulosti v tebe občas vyvolá tichý nepokoj?",
-    options: [
-      { code: "A", label: "Použil som svoj prehľad príliš tvrdo voči druhému človeku.", trait: "power_guilt" },
-      { code: "B", label: "Zanedbal som blízkeho človeka kvôli vlastným cieľom.", trait: "neglect_guilt" },
-      { code: "C", label: "Veril som nesprávnym ľuďom a vyčítam si vtedajšiu naivitu.", trait: "betrayal_scar" }
-    ]
-  }
 ];
 
 // DOM elements
@@ -77,9 +36,13 @@ const btnCalibrate = document.getElementById("btnCalibrate");
 const btnSkipCam = document.getElementById("btnSkipCam");
 
 const mFps = document.getElementById("mFps");
+const mLight = document.getElementById("mLight");
 const mBaseline = document.getElementById("mBaseline");
 const mZscore = document.getElementById("mZscore");
 const mBpm = document.getElementById("mBpm");
+
+const oracleWhisper = document.getElementById("oracleWhisper");
+const oracleWhisperText = document.getElementById("oracleWhisperText");
 
 // Runtime state
 let faceLandmarker = null;
@@ -96,19 +59,33 @@ let calibrating = false;
 let calStartMs = 0;
 const CAL_DURATION_MS = 10000;
 const calSamples = {};
-let baselineStats = null; // { key: { mean, std } }
+let baselineStats = null;
 
-// Experimental forehead rPPG buffer (green channel mean over time)
+// Experimental forehead rPPG & Luma buffer
 const rppgCanvas = document.createElement("canvas");
 const rppgCtx = rppgCanvas.getContext("2d", { willReadFrequently: true });
-const rppgBuffer = []; // { t, g }
+let rppgBuffer = [];
 const RPPG_WINDOW_MS = 12000;
 
-// Session record (matches backend-dsp/app/schemas.py)
+// Interactive Dialogue State
 let sessionData = createEmptySession();
-let currentQIndex = 0;
+let visitedIds = new Set();
+let domainScores = createEmptyDomainScores();
+let auditTrail = [];
+let maxSteps = 8;
+let currentStep = 0;
+let currentNodeId = "n01_entry";
 let qDisplayedAtMs = 0;
 let qTimerInterval = null;
+
+function createEmptyDomainScores() {
+  return {
+    relationships: 0,
+    career_finance: 0,
+    health_stress: 0,
+    skeptic_control: 0
+  };
+}
 
 function createEmptySession() {
   return {
@@ -119,19 +96,36 @@ function createEmptySession() {
     baseline_calibrated: false,
     questions: [],
     microexpression_spikes: [],
-    rppg_estimates: []
+    rppg_estimates: [],
+    meta: {
+      engine_version: "2.0.0",
+      total_graph_nodes: getTotalNodeCount(),
+      selected_depth: maxSteps
+    }
   };
+}
+
+function escapeHtml(str) {
+  return String(str)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
 }
 
 function log(msg) {
   const ts = new Date().toISOString().split("T")[1].slice(0, 8);
-  debugLog.textContent = `[${ts}] ${msg}
-` + debugLog.textContent.slice(0, 2500);
+  debugLog.textContent = `[${ts}] ${msg}\n` + debugLog.textContent.slice(0, 2600);
 }
 
 function showStage(id) {
   document.querySelectorAll(".stage").forEach((el) => el.classList.remove("active"));
   document.getElementById(id).classList.add("active");
+}
+
+function getSelectedDepth() {
+  const checked = document.querySelector('input[name="sessionDepth"]:checked');
+  return checked ? Number(checked.value) : 8;
 }
 
 function initBars() {
@@ -175,13 +169,16 @@ async function startCamera() {
 
     await initMediaPipe();
 
+    // Front camera uses lighter 640x480 to maximize mobile FPS & reduce low-light shutter drag.
+    // Rear camera uses 1280x720 for superior optics and observer-mode accuracy.
+    const isFront = facingMode === "user";
     const constraints = {
       audio: false,
       video: {
         facingMode: { ideal: facingMode },
-        width: { ideal: 1280 },
-        height: { ideal: 720 },
-        frameRate: { ideal: 60, min: 30 }
+        width: { ideal: isFront ? 640 : 1280 },
+        height: { ideal: isFront ? 480 : 720 },
+        frameRate: { ideal: 60, min: 24 }
       }
     };
 
@@ -189,16 +186,21 @@ async function startCamera() {
     video.srcObject = stream;
     await video.play();
 
+    lastVideoTime = -1;
+    rppgBuffer = [];
+
     const trackSettings = stream.getVideoTracks()[0].getSettings();
-    log(`Kamera aktívna (${facingMode}): ${trackSettings.width}x${trackSettings.height} @ ${Math.round(trackSettings.frameRate || 30)} fps`);
+    log(
+      `Kamera aktívna (${isFront ? "Predná 480p" : "Zadná 720p"}): ${trackSettings.width}x${trackSettings.height} @ ${Math.round(trackSettings.frameRate || 30)} fps`
+    );
 
     overlay.width = video.videoWidth || 640;
     overlay.height = video.videoHeight || 480;
-    rppgCanvas.width = 64;
-    rppgCanvas.height = 64;
+    rppgCanvas.width = 16;
+    rppgCanvas.height = 16;
 
     running = true;
-    statusPill.textContent = `Aktívna (${facingMode === "user" ? "Predná" : "Zadná"})`;
+    statusPill.textContent = `Aktívna (${isFront ? "Predná" : "Zadná"})`;
     statusPill.className = "pill online";
     btnToggleCam.disabled = false;
     btnCalibrate.disabled = false;
@@ -220,14 +222,17 @@ function stopCamera() {
     stream = null;
   }
   video.srcObject = null;
+  lastVideoTime = -1;
+  rppgBuffer = [];
   ctx.clearRect(0, 0, overlay.width, overlay.height);
   statusPill.textContent = "Kamera vypnutá";
   statusPill.className = "pill offline";
+  mLight.textContent = "--";
+  mLight.className = "";
   btnStartCam.textContent = "Spustiť kameru a MediaPipe";
 }
 
-function extractForeheadRppg(landmarks, nowMs) {
-  // Forehead ROI roughly around landmark 10 (top center) and 151 (glabella)
+function extractForeheadRppgAndLight(landmarks, nowMs) {
   const pt = landmarks[151];
   if (!pt || video.videoWidth === 0) return;
 
@@ -240,42 +245,68 @@ function extractForeheadRppg(landmarks, nowMs) {
   rppgCtx.drawImage(video, sx, sy, box, box, 0, 0, 16, 16);
   const img = rppgCtx.getImageData(0, 0, 16, 16).data;
   let greenSum = 0;
+  let lumaSum = 0;
   const pxCount = img.length / 4;
-  for (let i = 0; i < img.length; i += 4) {
-    greenSum += img[i + 1];
-  }
-  const gMean = greenSum / pxCount;
-  rppgBuffer.push({ t: nowMs, g: gMean });
 
+  for (let i = 0; i < img.length; i += 4) {
+    const r = img[i];
+    const g = img[i + 1];
+    const b = img[i + 2];
+    greenSum += g;
+    lumaSum += 0.299 * r + 0.587 * g + 0.114 * b;
+  }
+
+  const gMean = greenSum / pxCount;
+  const lumaMean = lumaSum / pxCount;
+
+  if (frameCount % 15 === 0) {
+    if (lumaMean < 65) {
+      mLight.textContent = "Slabé (pridaj)";
+      mLight.className = "text-danger";
+    } else if (lumaMean < 105) {
+      mLight.textContent = "Stredné";
+      mLight.className = "text-warn";
+    } else {
+      mLight.textContent = "Dobré";
+      mLight.className = "text-ok";
+    }
+  }
+
+  rppgBuffer.push({ t: nowMs, g: gMean });
   while (rppgBuffer.length > 0 && nowMs - rppgBuffer[0].t > RPPG_WINDOW_MS) {
     rppgBuffer.shift();
   }
 
-  // Estimate BPM via detrended zero-crossing / peak cadence every ~1s when window >= 6s
-  if (rppgBuffer.length > 120 && frameCount % 30 === 0) {
+  if (rppgBuffer.length > 100 && frameCount % 30 === 0) {
+    if (lumaMean < 65) {
+      mBpm.textContent = "Málo svetla";
+      return;
+    }
     const durationSec = (rppgBuffer[rppgBuffer.length - 1].t - rppgBuffer[0].t) / 1000;
     if (durationSec >= 6) {
       const vals = rppgBuffer.map((p) => p.g);
       const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
       const centered = vals.map((v) => v - mean);
 
-      // Simple moving average smoothing (window 5)
       const smooth = [];
       for (let i = 2; i < centered.length - 2; i++) {
-        smooth.push((centered[i - 2] + centered[i - 1] + centered[i] + centered[i + 1] + centered[i + 2]) / 5);
+        smooth.push(
+          (centered[i - 2] + centered[i - 1] + centered[i] + centered[i + 1] + centered[i + 2]) / 5
+        );
       }
 
       let peaks = 0;
       let lastPeakIdx = -10;
-      const minGap = Math.max(8, Math.floor((smooth.length / durationSec) * 0.42)); // max ~140 bpm
+      const minGap = Math.max(6, Math.floor((smooth.length / durationSec) * 0.42));
       for (let i = 1; i < smooth.length - 1; i++) {
-        if (smooth[i] > smooth[i - 1] && smooth[i] > smooth[i + 1] && smooth[i] > 0.05) {
+        if (smooth[i] > smooth[i - 1] && smooth[i] > smooth[i + 1] && smooth[i] > 0.04) {
           if (i - lastPeakIdx >= minGap) {
             peaks++;
             lastPeakIdx = i;
           }
         }
       }
+
       const bpm = Math.round((peaks / durationSec) * 60);
       if (bpm >= 48 && bpm <= 135) {
         mBpm.textContent = `~${bpm} BPM`;
@@ -302,12 +333,10 @@ function processLoop() {
   if (video.currentTime !== lastVideoTime && faceLandmarker) {
     lastVideoTime = video.currentTime;
     const result = faceLandmarker.detectForVideo(video, nowPerf);
-
     ctx.clearRect(0, 0, overlay.width, overlay.height);
 
     if (result.faceLandmarks && result.faceLandmarks.length > 0) {
       const lm = result.faceLandmarks[0];
-      // Draw minimal forehead ROI + key anchor points
       const forehead = lm[151];
       ctx.strokeStyle = "#38bdf8";
       ctx.lineWidth = 2;
@@ -317,7 +346,7 @@ function processLoop() {
         36,
         28
       );
-      extractForeheadRppg(lm, nowPerf);
+      extractForeheadRppgAndLight(lm, nowPerf);
     }
 
     if (result.faceBlendshapes && result.faceBlendshapes.length > 0) {
@@ -340,7 +369,6 @@ function handleBlendshapes(map, nowEpoch) {
     for (const s of TRACKED_SHAPES) {
       calSamples[s.key].push(map[s.key] || 0);
     }
-
     if (elapsed >= CAL_DURATION_MS) {
       finishCalibration();
     }
@@ -375,13 +403,16 @@ function handleBlendshapes(map, nowEpoch) {
 
   mZscore.textContent = `${maxZ.toFixed(2)} σ`;
 
-  // Record statistically significant microexpression spikes during active questioning
-  if (baselineStats && document.getElementById("stageQuestion").classList.contains("active") && maxZ >= 2.2) {
+  if (
+    baselineStats &&
+    document.getElementById("stageQuestion").classList.contains("active") &&
+    maxZ >= 2.2
+  ) {
     const lastSpike = sessionData.microexpression_spikes[sessionData.microexpression_spikes.length - 1];
     if (!lastSpike || nowEpoch - lastSpike.timestamp_ms > 250) {
       sessionData.microexpression_spikes.push({
         timestamp_ms: nowEpoch,
-        question_id: QUESTIONS[currentQIndex].id,
+        question_id: currentNodeId,
         blendshape: maxKey,
         z_score: Number(maxZ.toFixed(2))
       });
@@ -389,12 +420,26 @@ function handleBlendshapes(map, nowEpoch) {
   }
 }
 
-function startCalibration() {
+function resetDialogueState(tierName) {
+  maxSteps = getSelectedDepth();
   sessionData = createEmptySession();
+  sessionData.tier = tierName;
+  sessionData.meta.selected_depth = maxSteps;
+  visitedIds = new Set();
+  domainScores = createEmptyDomainScores();
+  auditTrail = [];
+  currentStep = 0;
+  currentNodeId = "n01_entry";
+  oracleWhisper.classList.add("hidden");
+  oracleWhisperText.textContent = "";
+}
+
+function startCalibration() {
+  resetDialogueState("tier1_web_mediapipe");
   for (const s of TRACKED_SHAPES) calSamples[s.key] = [];
   calibrating = true;
   calStartMs = Date.now();
-  mBaseline.textContent = "Prebieha...";
+  mBaseline.textContent = "Baseline: Prebieha...";
   showStage("stageCalibration");
   log("Spustená 10s Baseline kalibrácia.");
 }
@@ -409,21 +454,80 @@ function finishCalibration() {
     baselineStats[s.key] = { mean, std: Math.sqrt(variance) };
   }
   sessionData.baseline_calibrated = true;
-  mBaseline.textContent = "Hotová";
-  log("Kalibrácia dokončená. Spúšťam profilovacie otázky.");
+  mBaseline.textContent = "Baseline: Hotová";
+  log("Kalibrácia hotová. Spúšťam adaptívny 30-uzlový graf.");
   startQuestions();
 }
 
 function startQuestions() {
-  currentQIndex = 0;
   showStage("stageQuestion");
-  renderQuestion();
+  renderNode(currentNodeId, null);
 }
 
-function renderQuestion() {
-  const q = QUESTIONS[currentQIndex];
-  document.getElementById("qStep").textContent = `OTÁZKA ${currentQIndex + 1} / ${QUESTIONS.length}`;
-  document.getElementById("qText").textContent = q.text;
+function findStrongestBiometricEvent() {
+  // Prioritize FACS microexpression spike; fall back to clearest latency outlier
+  if (sessionData.microexpression_spikes.length > 0) {
+    const topSpike = [...sessionData.microexpression_spikes].sort((a, b) => b.z_score - a.z_score)[0];
+    return {
+      type: "facs",
+      question_id: topSpike.question_id,
+      detail: `mikrovýraz (${topSpike.blendshape}, ${topSpike.z_score}σ)`
+    };
+  }
+  if (sessionData.questions.length >= 3) {
+    const sorted = [...sessionData.questions].sort((a, b) => b.latency_ms - a.latency_ms);
+    const avg = sessionData.questions.reduce((s, q) => s + q.latency_ms, 0) / sessionData.questions.length;
+    if (sorted[0].latency_ms > avg * 1.25 && sorted[0].latency_ms >= 2200) {
+      return {
+        type: "latency",
+        question_id: sorted[0].question_id,
+        detail: `váhanie ${sorted[0].latency_ms} ms`
+      };
+    }
+  }
+  return null;
+}
+
+function renderNode(nodeId, previousReaction) {
+  const node = NODES[nodeId];
+  if (!node) {
+    finishSession();
+    return;
+  }
+
+  currentNodeId = nodeId;
+  visitedIds.add(nodeId);
+  currentStep++;
+
+  document.getElementById("qStep").textContent = `KROK ${currentStep} / ${maxSteps}`;
+
+  const domainTag = document.getElementById("qDomainTag");
+  if (DOMAIN_META[node.domain]) {
+    domainTag.textContent = DOMAIN_META[node.domain].label;
+  } else if (node.domain === "biometric") {
+    domainTag.textContent = "Biometrický signál";
+  } else {
+    domainTag.textContent = node.phase === "opening" ? "Vstupná kalibrácia" : "Hĺbková vrstva";
+  }
+
+  if (previousReaction) {
+    oracleWhisperText.textContent = previousReaction;
+    oracleWhisper.classList.remove("hidden");
+  } else {
+    oracleWhisper.classList.add("hidden");
+  }
+
+  let questionText = node.text;
+  if (nodeId === "c04_biometric_hook") {
+    const bio = findStrongestBiometricEvent();
+    const { primary } = rankDomains(domainScores);
+    const topic = DOMAIN_META[primary].oracleTopic;
+    if (bio) {
+      questionText = `Zastav sa na sekundu. Pred chvíľou pri téme (${topic}) som zachytil miernu odchýlku v tvojej reakcii (${bio.detail}). Dotklo sa to niečoho, čo pred okolím radšej skrývaš?`;
+    }
+  }
+
+  document.getElementById("qText").textContent = questionText;
 
   const optsEl = document.getElementById("qOptions");
   optsEl.innerHTML = "";
@@ -434,20 +538,27 @@ function renderQuestion() {
     document.getElementById("qTimer").textContent = `${Date.now() - qDisplayedAtMs} ms`;
   }, 50);
 
-  for (const opt of q.options) {
+  for (const opt of node.options) {
     const btn = document.createElement("button");
     btn.className = "option-btn";
     btn.textContent = `${opt.code}) ${opt.label}`;
-    btn.addEventListener("click", () => selectAnswer(q, opt));
+    btn.addEventListener("click", () => selectAnswer(node, opt));
     optsEl.appendChild(btn);
   }
 }
 
-function selectAnswer(q, opt) {
+function selectAnswer(node, opt) {
   const answeredAtMs = Date.now();
   const latencyMs = answeredAtMs - qDisplayedAtMs;
+
+  if (opt.domainBoost) {
+    for (const [dom, weight] of Object.entries(opt.domainBoost)) {
+      if (domainScores[dom] !== undefined) domainScores[dom] += weight;
+    }
+  }
+
   sessionData.questions.push({
-    question_id: q.id,
+    question_id: node.id,
     displayed_at_ms: qDisplayedAtMs,
     answered_at_ms: answeredAtMs,
     latency_ms: latencyMs,
@@ -455,52 +566,110 @@ function selectAnswer(q, opt) {
     trait: opt.trait
   });
 
-  log(`Odpoveď ${q.id}: ${opt.code} (${latencyMs} ms)`);
-  currentQIndex++;
-  if (currentQIndex < QUESTIONS.length) {
-    renderQuestion();
+  auditTrail.push({
+    step: currentStep,
+    question_id: node.id,
+    question_text: node.text,
+    chosen_label: opt.label,
+    latency_ms: latencyMs,
+    oracle_reaction: opt.oracleReaction,
+    technique: opt.technique,
+    debunk: opt.debunkExplanation
+  });
+
+  log(`Krok ${currentStep} [${node.id}] -> ${opt.code} (${latencyMs} ms) | ${opt.technique}`);
+
+  const nextId = resolveNextNodeId({
+    currentOption: opt,
+    visitedIds,
+    domainScores,
+    maxSteps,
+    stepCount: currentStep,
+    strongestBiometricEvent: findStrongestBiometricEvent()
+  });
+
+  if (nextId) {
+    renderNode(nextId, opt.oracleReaction);
   } else {
-    clearInterval(qTimerInterval);
-    buildResults();
-    showStage("stageResult");
+    finishSession();
   }
 }
 
-function buildResults() {
-  const traits = new Set(sessionData.questions.map((q) => q.trait));
+function finishSession() {
+  if (qTimerInterval) clearInterval(qTimerInterval);
+  const { primary, secondary } = rankDomains(domainScores);
+  sessionData.meta.primary_domain = primary;
+  sessionData.meta.secondary_domain = secondary;
+  buildResults(primary, secondary);
+  showStage("stageResult");
+  document.getElementById("resultOracle").classList.remove("hidden");
+  document.getElementById("resultDebunk").classList.add("hidden");
+}
+
+function buildResults(primaryKey, secondaryKey) {
+  const primary = DOMAIN_META[primaryKey];
+  const secondary = DOMAIN_META[secondaryKey];
   const avgLatency = Math.round(
-    sessionData.questions.reduce((a, b) => a + b.latency_ms, 0) / sessionData.questions.length
+    sessionData.questions.reduce((a, b) => a + b.latency_ms, 0) / Math.max(sessionData.questions.length, 1)
   );
   const slowest = [...sessionData.questions].sort((a, b) => b.latency_ms - a.latency_ms)[0];
+  const bioEvent = findStrongestBiometricEvent();
 
-  // 1. Oracle Mode (Illusion)
-  const oracleLines = [
-    "<h3>Tvoja osobná veštba (Simulácia veštice)</h3>",
-    "<p>Tvoja energia ukazuje na silnú vnútornú potrebu samostatnosti. Navonok pôsobíš vyrovnane a silno, ale v tichých chvíľach v sebe nesieš otázku, či dávaš svoju dôveru správnym ľuďom.</p>"
+  // 1. Rezim Vestec (Personalizovana synteza)
+  const oracleHtml = [
+    `<h3>Tvoja osobná veštba (Ilúzia)</h3>`,
+    `<p class="oracle-quote">„Keď som spojil všetky tvoje signály, obraz sa úplne vyjasnil. Tvojím hlavným ohniskom v tomto období je <strong>${escapeHtml(primary.oracleTopic)}</strong>, pričom v pozadí do toho potichu zasahuje aj téma: ${escapeHtml(secondary.oracleTopic)}.“</p>`,
+    `<p>Navonok pôsobíš vyrovnanejšie, než sa cítiš v tichých chvíľach. Máš v sebe silný vnútorný kompas, ale dlhodobo na seba berieš príliš veľa zodpovednosti a riešiš v hlave scenáre, ktoré ťa zbytočne vyčerpávajú.</p>`,
+    bioEvent
+      ? `<p>Navyše bolo zreteľne cítiť jemné vnútorné napätie v momente, keď sme sa priblížili k jadru problému (${escapeHtml(bioEvent.detail)}). Presne tam sa skrýva vec, ktorú už vnútorne poznáš, ale odkladáš jej vyslovenie nahlas.</p>`
+      : `<p>Rytmus tvojich reakcií ukázal jasné zaváhanie presne tam, kde rozum bojuje s emóciou. Odpoveď na tvoju dilemu už v sebe dávno nosíš — zlom príde v najbližších mesiacoch v momente, keď prestaneš robiť kompromis sám proti sebe.</p>`,
+    `<div class="debunk-card info"><strong>Zastav sa na 5 sekúnd:</strong> Ak si mal pri čítaní pocit, že to znie prekvapivo presne, klikni hore na červené tlačidlo <strong>FLIP MODE: Pitva trikov</strong> a pozri si, ako ľahko ťa práve naprogramoval obyčajný strom podmienok.</div>`
   ];
-  if (traits.has("control") || traits.has("autonomy")) {
-    oracleLines.push("<p>Vidím okolo teba líderskú stopu — neznesieš, keď ti niekto diktuje smer. Ľudia sa o teba opierajú, aj keď si málokedy všimnú, aký tlak to na teba kladie.</p>");
-  }
-  if (traits.has("betrayal_scar") || traits.has("vigilance")) {
-    oracleLines.push("<p>Minulé sklamanie v dôvere v tebe vytvorilo neviditeľný štít. Analyzuješ okolie pod povrchom, lebo tvoja duša sa chráni pred ďalším zneužitím.</p>");
-  }
-  oracleLines.push("<p><strong>Skrytý potenciál:</strong> Riešenie tvojej aktuálnej dilemy už v sebe poznáš, len čakáš na správny moment, aby si zložil brnenie.</p>");
-  document.getElementById("resultOracle").innerHTML = oracleLines.join("");
+  document.getElementById("resultOracle").innerHTML = oracleHtml.join("");
 
-  // 2. Flip Mode (Debunk + Biometrics)
+  // 2. FLIP MODE (Kompletna pitva manipulacie + biometria)
   const spikesByQ = {};
   for (const sp of sessionData.microexpression_spikes) {
     spikesByQ[sp.question_id] = (spikesByQ[sp.question_id] || 0) + 1;
   }
 
-  const debunkLines = [
-    "<h3>FLIP MODE: Čo sa v skutočnosti stalo (Žiadna mágia)</h3>",
-    `<div class="debunk-card"><strong>1. Barnumov efekt a Dúhová lesť:</strong> Veta „navonok pôsobíš silno, ale v tichu pochybuješ“ sedí na viac než 90 % populácie. Veštice ju používajú v prvých 30 sekundách na vytvorenie falošnej dôvery.</div>`,
-    `<div class="debunk-card"><strong>2. Recyklácia tvojich vlastných dát (Feed-back loop):</strong> Text veštby neobsahoval žiadnu novú informáciu. Len parafrázoval tvoje vlastné voľby (${[...traits].join(", ")}) do mystického jazyka.</div>`,
-    `<div class="debunk-card ok"><strong>3. Kognitívna záťaž (Latencia odpovedí):</strong> Priemerný čas reakcie bol <strong>${avgLatency} ms</strong>. Najdlhšie si váhal pri otázke <strong>${slowest.question_id.toUpperCase()}</strong> (${slowest.latency_ms} ms) — v psychológii to indikuje vyššiu kognitívnu záťaž alebo citlivú tému.</div>`,
-    `<div class="debunk-card ok"><strong>4. Lokálne FACS mikrovýrazy (> 2.2σ od tvojho základu):</strong> Celkovo zachytených špičiek: <strong>${sessionData.microexpression_spikes.length}</strong>. Rozloženie po otázkach: <code>${JSON.stringify(spikesByQ)}</code>. Žiadne video neopustilo tvoje zariadenie.</div>`
+  const auditHtml = auditTrail
+    .map((item) => {
+      const spCount = spikesByQ[item.question_id] || 0;
+      const spikeBadge = spCount > 0 ? ` | FACS špičky: ${spCount}` : "";
+      return `
+        <div class="audit-item">
+          <div class="audit-head">
+            <strong>Krok ${item.step} (${item.latency_ms} ms${spikeBadge})</strong>
+            <span class="tech-tag">${escapeHtml(item.technique)}</span>
+          </div>
+          <p class="audit-choice"><strong>Tvoja voľba:</strong> ${escapeHtml(item.chosen_label)}</p>
+          <p class="audit-oracle"><strong>Čo povedala „veštica“:</strong> „${escapeHtml(item.oracle_reaction)}“</p>
+          <p class="audit-debunk"><strong>Ako fungoval trik:</strong> ${escapeHtml(item.debunk)}</p>
+        </div>
+      `;
+    })
+    .join("");
+
+  const debunkHtml = [
+    `<h3>FLIP MODE: Vedecká pitva celého rozhovoru (Žiadna mágia)</h3>`,
+    `<div class="debunk-card">
+      <strong>1. Ako „vedela“, že riešiš ${escapeHtml(primary.label.toLowerCase())}?</strong><br />
+      Nevytiahla to z kariet ani z energie. Už tvoje prvé kliknutie pridelilo oblasti <em>${escapeHtml(primary.label)}</em> najvyššiu váhu (skóre: <code>${JSON.stringify(domainScores)}</code>) a presmerovalo rozhovor do pripravenej vetvy z 30-uzlového scenára. Presne takto fungujú platené ezolinky za 2 € za minútu.
+    </div>`,
+    `<div class="debunk-card ok">
+      <strong>2. Kognitívna záťaž a biometria:</strong><br />
+      Priemerný čas odpovede: <strong>${avgLatency} ms</strong>. Najdlhšie váhanie nastalo pri kroku <code>${slowest ? slowest.question_id : "-"}</code> (<strong>${slowest ? slowest.latency_ms : 0} ms</strong>).
+      Zachytené FACS mikrovýrazy nad 2.2σ: <strong>${sessionData.microexpression_spikes.length}</strong> (<code>${JSON.stringify(spikesByQ)}</code>). Video neopustilo tvoje zariadenie.
+    </div>`,
+    `<div class="debunk-card info">
+      <strong>3. Psychologický náznak (Schémová terapia Jeffreyho Younga):</strong><br />
+      Tvoje odpovede naznačujú najčastejšie témy v oblasti: <strong>${escapeHtml(primary.schemaHint)}</strong>. Namiesto veštice sa s týmito vzorcami pracuje vedecky cez kognitívny reframing a pomenovanie vlastných hraníc.
+    </div>`,
+    `<h4 style="margin: 16px 0 6px 0;">Krok za krokom — každá technika použitá proti tebe:</h4>`,
+    auditHtml
   ];
-  document.getElementById("resultDebunk").innerHTML = debunkLines.join("");
+  document.getElementById("resultDebunk").innerHTML = debunkHtml.join("");
 }
 
 // Event bindings
@@ -517,8 +686,7 @@ btnToggleCam.addEventListener("click", () => {
 btnCalibrate.addEventListener("click", startCalibration);
 
 btnSkipCam.addEventListener("click", () => {
-  sessionData = createEmptySession();
-  sessionData.tier = "tier0_text_latency_only";
+  resetDialogueState("tier0_text_latency_only");
   startQuestions();
 });
 
@@ -541,8 +709,9 @@ document.getElementById("btnExportJson").addEventListener("click", () => {
 });
 
 document.getElementById("btnRestart").addEventListener("click", () => {
+  if (qTimerInterval) clearInterval(qTimerInterval);
   showStage("stageIntro");
 });
 
 initBars();
-log("Systém pripravený. Spusti kameru pre 60fps FACS analýzu.");
+log(`The Mirror v2 pripravený (${getTotalNodeCount()} adaptívnych uzlov).`);
