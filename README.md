@@ -1,28 +1,23 @@
-# MindShield & The Mirror — Portable Dev Workspace
+# MindShield & The Mirror (v2.3) — Complete Portable Workspace
 
-Pripravené priamo na import do **Claude Code**, **OpenAI Codex** alebo **Google Antigravity**.
+Kompletný repozitár pripravený priamo pre **GitHub Desktop**, **GitHub Pages**, **Claude Code**, **OpenAI Codex** a **Google Antigravity**.
 
-## Rýchly štart (Webová verzia — The Mirror)
+## Obsah repozitára
+- `.gitattributes` — zjednotenie koncov riadkov (`LF` pre web/kód, `CRLF` pre Windows `.ps1`/`.bat`) bez varovaní v GitHub Desktop.
+- `.gitignore` — ochrana tajných kľúčov, `.env` a lokálnych build súborov vo verejnom repozitári.
+- `.github/workflows/deploy-pages.yml` — automatické publikovanie priečinka `web-mirror/` na GitHub Pages pri každom pushi do vetvy `main`.
+- `web-mirror/` — **The Mirror v2.3** (30-uzlový adaptívny graf, prípravná obrazovka so ŠTART tlačidlom, plávajúce mini okno tváre, detekcia orezania a pohybu, GPU/CPU fallback MediaPipe).
+- `backend-dsp/` — FastAPI + NeuroKit2 DSP backend pre HRV analýzu a synchronizáciu biometrie.
+- `android-wearos-probe/` — Kotlin moduly pre Galaxy Watch 6 sondu, CameraX MediaPipe a Finger PPG.
+
+## Nasadenie cez GitHub Desktop na GitHub Pages
+1. V GitHub Desktop zvoľ **File -> Add local repository** a vyber tento koreňový priečinok (`mindshield-mirror-workspace-v2.3`).
+2. Klikni na **Publish repository** (odškrtni *Keep this code private*, pre bezplatný GitHub Pages musí byť repozitár verejný).
+3. Na GitHube otvor **Settings -> Pages** a v časti **Source** vyber **GitHub Actions**.
+4. Po dokončení workflow v záložke **Actions** otvor vygenerovanú `https://...github.io/...` adresu v Chrome na mobile.
+
+## Lokálne spustenie na PC
 ```bash
 cd web-mirror
 python3 -m http.server 8080
 ```
-Otvor `http://localhost:8080` v Chrome / Edge (alebo cez HTTPS na mobile).
-- Obsahuje lokálny **MediaPipe Face Landmarker** (52 FACS Blendshapes).
-- Prepínač **Predná / Zadná kamera**.
-- 10-sekundová **Baseline kalibrácia** + výpočet Z-score špičiek.
-- Experimentálny **rPPG** odhad tepu zo zeleného kanála čela.
-- Režim **Veštec** + **FLIP MODE (Debunk)** + export jednotného JSON pre Python backend.
-
-## Rýchly štart (Python DSP Backend — NeuroKit2)
-```bash
-cd backend-dsp
-docker compose up --build
-```
-Swagger API dokumentácia: `http://localhost:8000/docs`
-
-## Android / Wear OS (Galaxy Watch 6 sonda + CameraX)
-Zdrojové Kotlin moduly sú v `android-wearos-probe/`:
-1. `wear/SensorProbeService.kt` — výpis všetkých systémových a Samsung vendor senzorov cez ADB logcat.
-2. `mobile/FaceMicroexpressionAnalyzer.kt` — CameraX + MediaPipe GPU analyzer (predná aj zadná kamera).
-3. `mobile/FingerPpgAnalyzer.kt` — ranné HRV cez prst na zadnej kamere s LED bleskom (bez hodiniek).

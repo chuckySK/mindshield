@@ -1,4 +1,4 @@
-﻿name: Deploy The Mirror to GitHub Pages
+name: Deploy The Mirror to GitHub Pages
 
 on:
   push:

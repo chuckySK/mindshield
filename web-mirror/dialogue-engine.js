@@ -1055,29 +1055,3 @@ export function resolveNextNodeId({
 
   return target;
 }
-export const TEST_PRESETS = {
-  quick_mirror: {
-    id: "quick_mirror",
-    title: "Rýchle zrkadlo (Klasická veštba)",
-    description: "8 adaptívnych krokov naprieč hlavnou vetvou. Ideálne na prvú ukážku (cca 2 min).",
-    maxSteps: 8,
-    startNodeId: "n01_entry",
-    initialDomainScores: { relationships: 0, career_finance: 0, health_stress: 0, skeptic_control: 0 }
-  },
-  deep_analysis: {
-    id: "deep_analysis",
-    title: "Hlboký rozbor (Hlavná + vedľajšia vetva)",
-    description: "12 krokov s premostením do druhej oblasti a biometrickým háčikom (cca 4 min).",
-    maxSteps: 12,
-    startNodeId: "n01_entry",
-    initialDomainScores: { relationships: 0, career_finance: 0, health_stress: 0, skeptic_control: 0 }
-  },
-  skeptic_profiler: {
-    id: "skeptic_profiler",
-    title: "Režim Profilovač / Skúška skeptika",
-    description: "8 krokov zameraných na obranný štít, dôveru, kontrolu a pascu Kafka Trap.",
-    maxSteps: 8,
-    startNodeId: "s01_skep_shield",
-    initialDomainScores: { relationships: 0, career_finance: 0, health_stress: 0, skeptic_control: 3 }
-  }
-};

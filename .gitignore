@@ -1,4 +1,4 @@
-﻿# Tajne kluce a konfiguracia (NIKDY neposielat do verejneho repozitara)
+# Secrets & environment variables (NEVER commit to public repository)
 .env
 .env.*
 *.pem
@@ -7,13 +7,13 @@
 *.keystore
 secrets/
 
-# Python a Docker
+# Python & Docker
 __pycache__/
 *.py[cod]
 .venv/
 venv/
 
-# Android a IDE
+# Android & IDEs
 .gradle/
 build/
 local.properties

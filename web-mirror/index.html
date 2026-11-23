@@ -3,14 +3,14 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>The Mirror v3 — Interaktívny Cold Reading &amp; Debunk Lab</title>
-  <link rel="stylesheet" href="styles.css" />
+  <title>The Mirror v2.3 — Interaktívny Cold Reading & Debunk Lab</title>
+  <link rel="stylesheet" href="styles.css?v=2.3" />
 </head>
 <body>
   <header class="topbar">
     <div class="brand">
-      <h1>THE MIRROR <span class="ver">v3</span></h1>
-      <span class="badge">LOCAL-FIRST • 30-UZLOVÝ GRAF • FACE-LOCK HUD</span>
+      <h1>THE MIRROR <span class="ver">v2.3</span></h1>
+      <span class="badge">LOCAL-FIRST • 30-UZLOVÝ GRAF • ZERO VIDEO UPLOAD</span>
     </div>
     <div class="controls">
       <button id="btnToggleCam" class="btn secondary" disabled>Prepnúť kameru (Predná / Zadná)</button>
@@ -25,7 +25,7 @@
         <video id="webcam" autoplay playsinline muted></video>
         <canvas id="overlay"></canvas>
         <div id="statusPill" class="pill offline">Kamera vypnutá</div>
-        <div id="framingPill" class="pill framing-pill offline">Záber: --</div>
+        <div id="framingPill" class="pill pill-right offline">Tvár: --</div>
       </div>
 
       <div class="metrics-bar">
@@ -61,77 +61,87 @@
       </div>
     </section>
 
-    <!-- Pravy stlpec: Kalibracia -> Priprava a vyber testu -> Rozhovor -> Flip Mode -->
+    <!-- Pravy stlpec: Kalibracia -> Priprava/Vyber testu -> Adaptivny rozhovor -> Flip Mode -->
     <section class="card session-panel">
-      <!-- FAZA 0: UVOD A KALIBRACIA -->
+      <!-- FAZA 0: Uvod a vyber rezimu snimania -->
       <div id="stageIntro" class="stage active">
-        <h2>Krok 1: Nastavenie kamery a kalibrácia</h2>
+        <h2>Krok 1: Príprava kamery a kalibrácia</h2>
         <p>
-          Systém obsahuje <strong>30 prepojených psychologických uzlov</strong>. Najskôr zapni kameru
-          a urob 10-sekundovú kalibráciu neutrálneho výrazu. <strong>Test ani meranie času sa ešte
-          nespustia automaticky</strong> — po kalibrácii si v pokoji vyberieš typ testu, usadíš sa
-          a stlačíš tlačidlo <strong>Štart testu</strong>.
+          Systém obsahuje <strong>30 prepojených psychologických uzlov</strong> (vzťahy, práca a financie,
+          zdravie a stres, kontrola a skepsa). Najprv si spusti kameru a urob 10-sekundovú kalibráciu
+          neutrálnej tváre, alebo pokračuj bez kamery. <strong>Samotný test a meranie času sa spustia až na ďalšej obrazovke po kliknutí na ŠTART.</strong>
         </p>
 
         <p class="hint">
-          Tip pre mobil: Predná kamera beží v 480p pre lepšie FPS a vyžaduje dobré čelné svetlo.
+          Tip pre mobil: Predná kamera beží v ľahšom 480p pre vyššie FPS a potrebuje dobré čelné svetlo.
           Pre najvyššiu plynulosť alebo testovanie druhej osoby prepni na <strong>Zadnú kameru</strong>.
-          Počas testu zostane v rohu displeja plávajúce mini-okno so sledovaním polohy tváre.
         </p>
 
         <div class="actions">
-          <button id="btnCalibrate" class="btn primary" disabled>1. Spustiť 10s kalibráciu tváre</button>
-          <button id="btnSkipCam" class="btn secondary">Pokračovať bez kamery (len latencia a text)</button>
+          <button id="btnCalibrate" class="btn primary" disabled>Spustiť 10s kalibráciu tváre</button>
+          <button id="btnSkipCam" class="btn secondary">Pokračovať bez kamery (výber testu)</button>
         </div>
       </div>
 
-      <!-- FAZA 1: KALIBRACIA -->
+      <!-- FAZA 1: 10s Kalibracia s detekciou polohy tvare -->
       <div id="stageCalibration" class="stage">
         <h2>Kalibrácia neutrálneho výrazu</h2>
-        <p>Pozeraj sa pokojne do kamery, uvoľni tvár a nehovor. Ak tvár vyjde zo záberu, kalibrácia sa automaticky pozastaví.</p>
-        <div id="calFramingWarn" class="debunk-card hidden">
-          <strong>Tvár nie je celá v zábere!</strong> Uprav polohu telefónu alebo hlavy, aby bol rámček zelený.
-        </div>
+        <p>Umiestni celú tvár do zeleného oválu, uvoľni mimiku a nehovor. Ak tvár vyjde z obrazu, kalibrácia sa automaticky pozastaví.</p>
+        <div id="calGuardBanner" class="guard-banner ok">Tvár v obraze — zbieram neutrálny základ...</div>
         <div class="progress-track"><div id="calProgress" class="progress-fill"></div></div>
         <p id="calCounter" class="mono">0.0 / 10.0 s</p>
-        <div class="actions">
-          <button id="btnCancelCal" class="btn secondary">Zrušiť kalibráciu</button>
-        </div>
       </div>
 
-      <!-- FAZA 2: PRIPRAVA, VYBER TESTU A TLACIDLO START (Pred 1. otazkou) -->
+      <!-- FAZA 2: Pripravna obrazovka pred 1. otazkou (Nastavenie + Vyber testu + START) -->
       <div id="stageReady" class="stage">
-        <h2>Krok 2: Vyber test a priprav sa</h2>
-        <div id="readyStatusBox" class="ready-status">
-          <span id="readyCalBadge" class="badge">Kalibrácia pripravená</span>
-          <span id="readyFaceBadge" class="mono">Kontrola polohy tváre: --</span>
-        </div>
-
-        <p class="ready-desc">
-          Teraz máš čas pohodlne sa usadiť a nastaviť telefón tak, aby bola tvoja tvár celá v zelenom
-          rámčeku. <strong>Čas prvej otázky sa začne počítať až v momente, keď klikneš na ŠTART TESTU.</strong>
+        <h2>Krok 2: Nastavenie polohy a výber testu</h2>
+        <p>
+          Uprav si pohodlnú polohu telefónu alebo hlavy. <strong>Čas reakcie na 1. otázku sa začne počítať až v momente, keď klikneš na tlačidlo ŠTART TESTU.</strong>
         </p>
 
-        <div class="depth-picker">
-          <label class="depth-label">Vyber režim testu:</label>
-          <div id="presetList" class="preset-list"></div>
+        <div id="readyChecklist" class="ready-checklist">
+          <div class="check-row">
+            <span>Režim snímania:</span>
+            <strong id="readyModeLabel">--</strong>
+          </div>
+          <div class="check-row">
+            <span>Kalibrácia tváre:</span>
+            <strong id="readyCalLabel">--</strong>
+          </div>
+          <div class="check-row">
+            <span>Aktuálna poloha tváre:</span>
+            <strong id="readyFramingLabel">--</strong>
+          </div>
         </div>
 
-        <label class="toggle-row">
-          <input type="checkbox" id="chkPauseOnReposition" checked />
-          <span>
-            <strong>Odpočítať čas úpravy polohy (odporúčané)</strong><br />
-            <small>Ak tvár úplne zmizne zo záberu alebo je pri okraji, čistá latencia a zber FACS špičiek sa pozastavia (vrátane 450 ms stabilizácie po návrate).</small>
-          </span>
-        </label>
+        <div class="depth-picker">
+          <label class="depth-label">Vyber typ a dĺžku testu:</label>
+          <div class="depth-options">
+            <label class="radio-card">
+              <input type="radio" name="sessionDepth" value="8" checked />
+              <div>
+                <strong>Rýchle zrkadlo (8 krokov)</strong>
+                <span>Ideálne na mobil a rýchlu ukážku (cca 2 min)</span>
+              </div>
+            </label>
+            <label class="radio-card">
+              <input type="radio" name="sessionDepth" value="12" />
+              <div>
+                <strong>Hlboký rozbor (12 krokov)</strong>
+                <span>Prejde hlavnú aj vedľajšiu vetvu + biometrický háčik (cca 4 min)</span>
+              </div>
+            </label>
+          </div>
+        </div>
 
         <div class="actions">
-          <button id="btnStartTest" class="btn start-btn">▶ ŠTART TESTU (Zobraziť 1. otázku)</button>
+          <button id="btnStartTest" class="btn start-hero">ŠTART TESTU (Zobraziť 1. otázku)</button>
           <button id="btnRecalibrate" class="btn secondary">Zopakovať kalibráciu</button>
+          <button id="btnBackIntro" class="btn secondary">Späť</button>
         </div>
       </div>
 
-      <!-- FAZA 3: INTERAKTIVNY ROZHOVOR -->
+      <!-- FAZA 3: Aktivne otazky -->
       <div id="stageQuestion" class="stage">
         <div class="q-header">
           <span id="qStep" class="badge">KROK 1 / 8</span>
@@ -139,8 +149,11 @@
           <span id="qTimer" class="mono">0 ms</span>
         </div>
 
-        <div id="qFramingBanner" class="framing-banner hidden">
-          Tvár mimo ideálneho záberu — úprava polohy sa nezapočítava do čistého času ani do FACS špičiek.
+        <!-- Inline status sledovania tvare priamo nad otazkou (pre pripady bez PiP videa) -->
+        <div id="qTrackingStrip" class="tracking-strip hidden">
+          <span id="qTrackDot" class="status-dot ok"></span>
+          <span id="qTrackText">Tvár v obraze (FACS aktívne)</span>
+          <span id="qTrackGate" class="mono"></span>
         </div>
 
         <!-- Ziva reakcia vestice na predchadzajucu odpoved -->
@@ -153,7 +166,7 @@
         <div id="qOptions" class="options"></div>
       </div>
 
-      <!-- FAZA 4: VYSLEDKY A FLIP MODE -->
+      <!-- FAZA 4: Vysledok a FLIP MODE -->
       <div id="stageResult" class="stage">
         <div class="mode-switch">
           <button id="btnModeOracle" class="btn primary">1. Režim Veštec (Ilúzia)</button>
@@ -165,25 +178,33 @@
         <div id="resultDebunk" class="result-box hidden"></div>
 
         <div class="actions">
-          <button id="btnRestart" class="btn primary">Vybrať iný test (bez opakovanej kalibrácie)</button>
-          <button id="btnBackIntro" class="btn secondary">Späť na úvod</button>
+          <button id="btnRestart" class="btn secondary">Nový test (výber dĺžky)</button>
         </div>
       </div>
     </section>
   </main>
 
-  <!-- Plavajuce mini-okno (PiP Face-Lock HUD) viditelne aj pri skrolovani na mobile -->
-  <aside id="pipHud" class="pip-hud hidden state-offline" aria-live="polite">
-    <div class="pip-header">
-      <span id="pipDot" class="pip-dot"></span>
-      <span id="pipLabel" class="pip-label">Tvár OK</span>
-      <button id="btnPipMode" class="pip-toggle" title="Prepnúť mini náhľad / grafický indikátor">Mini</button>
+  <!-- Plavajuce mini okno / graficky indikator tvare pocas kalibracie, pripravy a testu -->
+  <aside id="pipHud" class="pip-hud hidden" aria-label="Náhľad polohy tváre">
+    <div class="pip-head">
+      <span id="pipDot" class="status-dot ok"></span>
+      <span id="pipStatusText" class="pip-title">Tvár OK</span>
+      <button id="btnPipToggle" class="pip-toggle" title="Prepnúť medzi mini videom a kompaktnou ikonou">Min</button>
     </div>
-    <div id="pipVisualWrap" class="pip-visual-wrap">
-      <canvas id="pipCanvas" width="160" height="120"></canvas>
+    <div id="pipVideoBox" class="pip-video-box">
+      <canvas id="pipCanvas" width="112" height="140"></canvas>
+    </div>
+    <div id="pipGraphicBox" class="pip-graphic-box hidden">
+      <svg class="face-glyph" viewBox="0 0 48 48" width="32" height="32" aria-hidden="true">
+        <ellipse id="glyphOval" cx="24" cy="24" rx="14" ry="18" fill="none" stroke="currentColor" stroke-width="2.5" stroke-dasharray="4 3" />
+        <circle cx="19" cy="21" r="2" fill="currentColor" />
+        <circle cx="29" cy="21" r="2" fill="currentColor" />
+        <path d="M19 30 Q24 33 29 30" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+      </svg>
+      <span id="pipGraphicHint">Zarovnané</span>
     </div>
   </aside>
 
-  <script type="module" src="app.js"></script>
+  <script type="module" src="app.js?v=2.3"></script>
 </body>
 </html>

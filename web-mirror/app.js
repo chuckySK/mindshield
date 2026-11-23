@@ -5,11 +5,10 @@ import {
 import {
   DOMAIN_META,
   NODES,
-  TEST_PRESETS,
   getTotalNodeCount,
   rankDomains,
   resolveNextNodeId
-} from "./dialogue-engine.js";
+} from "./dialogue-engine.js?v=2.3";
 
 const TRACKED_SHAPES = [
   { key: "browDownLeft", label: "Zvraštenie obočia (L)" },
@@ -21,12 +20,6 @@ const TRACKED_SHAPES = [
   { key: "mouthSmileRight", label: "Úsmev (P)" },
   { key: "jawOpen", label: "Napätie čeľuste" }
 ];
-
-// Framing & stability constants
-const CAL_DURATION_MS = 10000;
-const FACE_LOSS_GRACE_MS = 280;
-const REPOSITION_SETTLE_MS = 450;
-const RPPG_WINDOW_MS = 12000;
 
 // DOM elements
 const video = document.getElementById("webcam");
@@ -41,9 +34,9 @@ const btnStartCam = document.getElementById("btnStartCam");
 const btnToggleCam = document.getElementById("btnToggleCam");
 const btnCalibrate = document.getElementById("btnCalibrate");
 const btnSkipCam = document.getElementById("btnSkipCam");
-const btnCancelCal = document.getElementById("btnCancelCal");
 const btnStartTest = document.getElementById("btnStartTest");
 const btnRecalibrate = document.getElementById("btnRecalibrate");
+const btnBackIntro = document.getElementById("btnBackIntro");
 
 const mFps = document.getElementById("mFps");
 const mLight = document.getElementById("mLight");
@@ -51,49 +44,59 @@ const mBaseline = document.getElementById("mBaseline");
 const mZscore = document.getElementById("mZscore");
 const mBpm = document.getElementById("mBpm");
 
-const calFramingWarn = document.getElementById("calFramingWarn");
-const readyCalBadge = document.getElementById("readyCalBadge");
-const readyFaceBadge = document.getElementById("readyFaceBadge");
-const presetList = document.getElementById("presetList");
-const chkPauseOnReposition = document.getElementById("chkPauseOnReposition");
+const calGuardBanner = document.getElementById("calGuardBanner");
+const readyModeLabel = document.getElementById("readyModeLabel");
+const readyCalLabel = document.getElementById("readyCalLabel");
+const readyFramingLabel = document.getElementById("readyFramingLabel");
 
-const qFramingBanner = document.getElementById("qFramingBanner");
+const qTrackingStrip = document.getElementById("qTrackingStrip");
+const qTrackDot = document.getElementById("qTrackDot");
+const qTrackText = document.getElementById("qTrackText");
+const qTrackGate = document.getElementById("qTrackGate");
+
 const oracleWhisper = document.getElementById("oracleWhisper");
 const oracleWhisperText = document.getElementById("oracleWhisperText");
 
 // Floating PiP HUD elements
 const pipHud = document.getElementById("pipHud");
-const pipLabel = document.getElementById("pipLabel");
-const btnPipMode = document.getElementById("btnPipMode");
+const pipDot = document.getElementById("pipDot");
+const pipStatusText = document.getElementById("pipStatusText");
+const btnPipToggle = document.getElementById("btnPipToggle");
+const pipVideoBox = document.getElementById("pipVideoBox");
+const pipGraphicBox = document.getElementById("pipGraphicBox");
+const pipGraphicHint = document.getElementById("pipGraphicHint");
 const pipCanvas = document.getElementById("pipCanvas");
 const pipCtx = pipCanvas.getContext("2d");
 
-// Runtime vision state
+// Runtime camera & MediaPipe state
 let faceLandmarker = null;
 let stream = null;
 let facingMode = "user";
 let running = false;
 let rafId = null;
 let lastVideoTime = -1;
+let lastDetectTimestampMs = 0;
 let frameCount = 0;
 let lastFpsStamp = performance.now();
-let pipCompact = false;
+let lastFramePerf = performance.now();
+let lastPipDrawPerf = 0;
+let pipMinimized = false;
 
-// Framing & Repositioning state
-let framingStatus = {
-  code: "offline", // offline | ok | edge | too_close | too_far | missing
-  label: "Kamera vypnutá",
-  cssClass: "state-offline",
-  bbox: null
+// Framing & Motion artifact detector state
+let prevFaceCenter = null; // { x, y, h, t }
+let motionCooldownUntil = 0;
+let currentFraming = {
+  status: "missing", // "ok" | "warn" | "danger" | "missing"
+  shortText: "Mimo obrazu",
+  hint: "Tvár nie je v obraze",
+  motionArtifact: false,
+  box: null
 };
-let lastFaceSeenAtMs = 0;
-let settleUntilMs = 0;
-let wasOutOfFrame = false;
 
-// Calibration state (accumulates ONLY valid in-frame milliseconds)
+// Calibration state (pauses automatically if face leaves frame)
 let calibrating = false;
-let calValidMs = 0;
-let calLastTickMs = 0;
+let calAccumulatedMs = 0;
+const CAL_DURATION_MS = 10000;
 const calSamples = {};
 let baselineStats = null;
 
@@ -101,21 +104,33 @@ let baselineStats = null;
 const rppgCanvas = document.createElement("canvas");
 const rppgCtx = rppgCanvas.getContext("2d", { willReadFrequently: true });
 let rppgBuffer = [];
+const RPPG_WINDOW_MS = 12000;
 
-// Interactive Dialogue State
-let activePresetId = "quick_mirror";
-let sessionData = createEmptySession();
-let visitedIds = new Set();
-let domainScores = createEmptyDomainScores();
-let auditTrail = [];
+// Session & Stage state (all primitives declared BEFORE helper calls to prevent TDZ)
+let activeStageId = "stageIntro";
+let selectedTier = "tier1_web_mediapipe";
 let maxSteps = 8;
 let currentStep = 0;
 let currentNodeId = "n01_entry";
 let qDisplayedAtMs = 0;
-let qLastTimerTickMs = 0;
-let qRepositionMs = 0;
 let qTimerInterval = null;
-let currentTier = "tier1_web_mediapipe";
+let visitedIds = new Set();
+let domainScores = createEmptyDomainScores();
+let auditTrail = [];
+let sessionData = createEmptySession(maxSteps);
+
+// Per-question tracking quality accumulator (does not freeze stopwatch, gates FACS noise)
+let qTrackStats = createEmptyQuestionTrackStats();
+
+function createEmptyQuestionTrackStats() {
+  return {
+    totalFrames: 0,
+    validFrames: 0,
+    outOfFrameMs: 0,
+    motionArtifactFrames: 0,
+    suppressedSpikes: 0
+  };
+}
 
 function createEmptyDomainScores() {
   return {
@@ -126,22 +141,21 @@ function createEmptyDomainScores() {
   };
 }
 
-function createEmptySession() {
+function createEmptySession(depth = maxSteps) {
   return {
     session_id: `mirror_${Date.now()}`,
     created_at_ms: Date.now(),
-    tier: currentTier,
+    tier: selectedTier,
     camera_facing: facingMode,
-    baseline_calibrated: Boolean(baselineStats),
+    baseline_calibrated: false,
     questions: [],
     microexpression_spikes: [],
     rppg_estimates: [],
     meta: {
-      engine_version: "3.0.0",
+      engine_version: "2.3.0",
       total_graph_nodes: getTotalNodeCount(),
-      preset_id: activePresetId,
-      selected_depth: maxSteps,
-      pause_on_reposition: chkPauseOnReposition ? chkPauseOnReposition.checked : true
+      selected_depth: depth,
+      question_quality: {}
     }
   };
 }
@@ -160,22 +174,25 @@ function log(msg) {
 }
 
 function showStage(id) {
+  activeStageId = id;
   document.querySelectorAll(".stage").forEach((el) => el.classList.remove("active"));
   document.getElementById(id).classList.add("active");
   updatePipVisibility();
 }
 
 function updatePipVisibility() {
-  const inTestOrReady =
-    document.getElementById("stageReady").classList.contains("active") ||
-    document.getElementById("stageQuestion").classList.contains("active") ||
-    document.getElementById("stageCalibration").classList.contains("active");
+  const shouldShowPip =
+    running &&
+    (activeStageId === "stageCalibration" ||
+      activeStageId === "stageReady" ||
+      activeStageId === "stageQuestion");
+  pipHud.classList.toggle("hidden", !shouldShowPip);
+  qTrackingStrip.classList.toggle("hidden", !(running && activeStageId === "stageQuestion"));
+}
 
-  if (running && inTestOrReady) {
-    pipHud.classList.remove("hidden");
-  } else {
-    pipHud.classList.add("hidden");
-  }
+function getSelectedDepth() {
+  const checked = document.querySelector('input[name="sessionDepth"]:checked');
+  return checked ? Number(checked.value) : 8;
 }
 
 function initBars() {
@@ -192,124 +209,31 @@ function initBars() {
   }
 }
 
-function initPresets() {
-  presetList.innerHTML = "";
-  const presets = Object.values(TEST_PRESETS);
-  presets.forEach((p, idx) => {
-    const label = document.createElement("label");
-    label.className = "radio-card";
-    label.innerHTML = `
-      <input type="radio" name="testPreset" value="${escapeHtml(p.id)}" ${idx === 0 ? "checked" : ""} />
-      <div>
-        <strong>${escapeHtml(p.title)}</strong>
-        <span>${escapeHtml(p.description)}</span>
-      </div>
-    `;
-    presetList.appendChild(label);
-  });
-}
-
-function getSelectedPreset() {
-  const checked = document.querySelector('input[name="testPreset"]:checked');
-  const id = checked ? checked.value : "quick_mirror";
-  return TEST_PRESETS[id] || TEST_PRESETS.quick_mirror;
-}
-
-function setFramingStatus(code, label, cssClass, bbox = null) {
-  framingStatus = { code, label, cssClass, bbox };
-
-  framingPill.textContent = `Záber: ${label}`;
-  framingPill.className = "pill framing-pill " + (
-    code === "ok" ? "online" : code === "missing" ? "danger" : code === "offline" ? "offline" : "warn"
-  );
-
-  pipHud.classList.remove("state-offline", "state-ok", "state-warn", "state-missing");
-  pipHud.classList.add(cssClass);
-  pipLabel.textContent = label;
-
-  if (document.getElementById("stageReady").classList.contains("active")) {
-    if (!running) {
-      readyFaceBadge.textContent = "Režim bez kamery";
-      readyFaceBadge.className = "mono";
-    } else if (code === "ok") {
-      readyFaceBadge.textContent = "Poloha tváre: OK (pripravené na štart)";
-      readyFaceBadge.className = "mono text-ok";
-    } else {
-      readyFaceBadge.textContent = `Poloha tváre: ${label}`;
-      readyFaceBadge.className = "mono text-warn";
-    }
-  }
-}
-
-function evaluateFaceFraming(landmarks, nowEpoch) {
-  if (!landmarks || landmarks.length === 0) {
-    if (nowEpoch - lastFaceSeenAtMs > FACE_LOSS_GRACE_MS) {
-      wasOutOfFrame = true;
-      setFramingStatus("missing", "Tvár mimo záberu", "state-missing", null);
-    }
-    return;
-  }
-
-  lastFaceSeenAtMs = nowEpoch;
-  let minX = 1, minY = 1, maxX = 0, maxY = 0;
-  for (let i = 0; i < landmarks.length; i++) {
-    const p = landmarks[i];
-    if (p.x < minX) minX = p.x;
-    if (p.y < minY) minY = p.y;
-    if (p.x > maxX) maxX = p.x;
-    if (p.y > maxY) maxY = p.y;
-  }
-
-  const width = maxX - minX;
-  const height = maxY - minY;
-  const bbox = { minX, minY, maxX, maxY, width, height };
-
-  const inBounds = minX >= 0.03 && maxX <= 0.97 && minY >= 0.03 && maxY <= 0.97;
-  if (!inBounds) {
-    wasOutOfFrame = true;
-    setFramingStatus("edge", "Posuň tvár do stredu", "state-warn", bbox);
-    return;
-  }
-  if (width > 0.80 || height > 0.90) {
-    wasOutOfFrame = true;
-    setFramingStatus("too_close", "Príliš blízko", "state-warn", bbox);
-    return;
-  }
-  if (width < 0.14) {
-    wasOutOfFrame = true;
-    setFramingStatus("too_far", "Príliš ďaleko", "state-warn", bbox);
-    return;
-  }
-
-  if (wasOutOfFrame) {
-    wasOutOfFrame = false;
-    settleUntilMs = nowEpoch + REPOSITION_SETTLE_MS;
-  }
-  setFramingStatus("ok", "Tvár OK", "state-ok", bbox);
-}
-
-function isRepositioningNow(nowEpoch) {
-  if (!running) return false;
-  return framingStatus.code !== "ok" || nowEpoch < settleUntilMs;
-}
-
 async function initMediaPipe() {
   if (faceLandmarker) return;
   log("Načítavam MediaPipe FaceLandmarker WASM...");
   const vision = await FilesetResolver.forVisionTasks(
     "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
   );
-  faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
-    baseOptions: {
-      modelAssetPath:
-        "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
-      delegate: "GPU"
-    },
-    outputFaceBlendshapes: true,
-    runningMode: "VIDEO",
-    numFaces: 1
-  });
-  log("MediaPipe FaceLandmarker pripravený (GPU delegate).");
+  const modelUrl =
+    "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
+
+  for (const delegate of ["GPU", "CPU"]) {
+    try {
+      faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
+        baseOptions: { modelAssetPath: modelUrl, delegate },
+        outputFaceBlendshapes: true,
+        runningMode: "VIDEO",
+        numFaces: 1
+      });
+      log(`MediaPipe FaceLandmarker pripravený (${delegate} delegate).`);
+      return;
+    } catch (err) {
+      log(`WARN: MediaPipe ${delegate} zlyhal (${err.message}).`);
+      faceLandmarker = null;
+    }
+  }
+  throw new Error("Nepodarilo sa inicializovať MediaPipe ani na GPU, ani na CPU.");
 }
 
 async function startCamera() {
@@ -335,13 +259,10 @@ async function startCamera() {
     video.srcObject = stream;
     await video.play();
 
-    // Mirror preview for intuitive self-framing on front camera
-    video.classList.toggle("mirrored", isFront);
-    overlay.classList.toggle("mirrored", isFront);
-
     lastVideoTime = -1;
+    lastDetectTimestampMs = 0;
     rppgBuffer = [];
-    lastFaceSeenAtMs = Date.now();
+    prevFaceCenter = null;
 
     const trackSettings = stream.getVideoTracks()[0].getSettings();
     log(
@@ -359,14 +280,14 @@ async function startCamera() {
     btnToggleCam.disabled = false;
     btnCalibrate.disabled = false;
     btnStartCam.textContent = "Zastaviť kameru";
-    updatePipVisibility();
 
+    updatePipVisibility();
+    refreshReadyChecklist();
     processLoop();
   } catch (err) {
     log(`CHYBA kamery/MediaPipe: ${err.message}`);
     statusPill.textContent = "Chyba kamery";
     statusPill.className = "pill offline";
-    setFramingStatus("offline", "Kamera vypnutá", "state-offline", null);
   }
 }
 
@@ -380,91 +301,195 @@ function stopCamera() {
   video.srcObject = null;
   lastVideoTime = -1;
   rppgBuffer = [];
+  prevFaceCenter = null;
   ctx.clearRect(0, 0, overlay.width, overlay.height);
   statusPill.textContent = "Kamera vypnutá";
   statusPill.className = "pill offline";
-  setFramingStatus("offline", "Kamera vypnutá", "state-offline", null);
+  framingPill.textContent = "Tvár: --";
+  framingPill.className = "pill pill-right offline";
   mLight.textContent = "--";
   mLight.className = "";
   btnStartCam.textContent = "Spustiť kameru a MediaPipe";
   updatePipVisibility();
+  refreshReadyChecklist();
 }
 
-function drawOverlays(landmarks) {
-  ctx.clearRect(0, 0, overlay.width, overlay.height);
-
-  // Subtle target framing guide on main canvas
-  ctx.strokeStyle = "rgba(148, 163, 184, 0.35)";
-  ctx.lineWidth = 1.5;
-  ctx.setLineDash([6, 6]);
-  ctx.strokeRect(
-    overlay.width * 0.14,
-    overlay.height * 0.08,
-    overlay.width * 0.72,
-    overlay.height * 0.84
-  );
-  ctx.setLineDash([]);
-
-  const boxColor =
-    framingStatus.code === "ok" ? "#22c55e" : framingStatus.code === "missing" ? "#f43f5e" : "#f59e0b";
-
-  if (framingStatus.bbox) {
-    const b = framingStatus.bbox;
-    ctx.strokeStyle = boxColor;
-    ctx.lineWidth = 2.5;
-    ctx.strokeRect(
-      b.minX * overlay.width,
-      b.minY * overlay.height,
-      b.width * overlay.width,
-      b.height * overlay.height
-    );
+function evaluateFaceFraming(landmarks, nowPerf) {
+  if (!landmarks || landmarks.length === 0) {
+    prevFaceCenter = null;
+    return {
+      status: "danger",
+      shortText: "Mimo obrazu",
+      hint: "Tvár nie je v zábere — namier kameru na seba",
+      motionArtifact: true,
+      box: null
+    };
   }
 
-  if (landmarks && landmarks.length > 151) {
-    const forehead = landmarks[151];
-    ctx.strokeStyle = "#38bdf8";
-    ctx.lineWidth = 2;
-    ctx.strokeRect(
-      forehead.x * overlay.width - 18,
-      forehead.y * overlay.height - 14,
-      36,
-      28
-    );
+  let minX = 1;
+  let maxX = 0;
+  let minY = 1;
+  let maxY = 0;
+  for (let i = 0; i < landmarks.length; i += 3) {
+    const p = landmarks[i];
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.y > maxY) maxY = p.y;
   }
 
-  // Draw floating PiP mini-window (only when visible and not compact)
-  if (!pipHud.classList.contains("hidden") && !pipCompact && video.readyState >= 2) {
+  const w = maxX - minX;
+  const h = maxY - minY;
+  const cx = (minX + maxX) / 2;
+  const cy = (minY + maxY) / 2;
+
+  // Motion velocity gate (detects phone repositioning / rapid head shift)
+  let rapidMove = false;
+  if (prevFaceCenter) {
+    const dtSec = Math.max(0.016, (nowPerf - prevFaceCenter.t) / 1000);
+    const dist = Math.hypot(cx - prevFaceCenter.x, cy - prevFaceCenter.y);
+    const scaleDelta = Math.abs(h - prevFaceCenter.h) / dtSec;
+    const speed = dist / dtSec;
+    if (speed > 0.36 || scaleDelta > 0.45) {
+      motionCooldownUntil = nowPerf + 450;
+      rapidMove = true;
+    }
+  }
+  prevFaceCenter = { x: cx, y: cy, h, t: nowPerf };
+  const motionArtifact = rapidMove || nowPerf < motionCooldownUntil;
+
+  // Margin & size checks
+  const margin = 0.035;
+  if (minX < margin || maxX > 1 - margin || minY < margin || maxY > 1 - margin) {
+    const dir =
+      minY < margin
+        ? "posuň hlavu nižšie"
+        : maxY > 1 - margin
+          ? "posuň hlavu vyššie"
+          : "vycentruj tvár do stredu";
+    return {
+      status: "danger",
+      shortText: "Orezaná tvár",
+      hint: `Časť tváre je mimo záber — ${dir}`,
+      motionArtifact: true,
+      box: { minX, maxX, minY, maxY, cx, cy, w, h }
+    };
+  }
+
+  if (h < 0.21) {
+    return {
+      status: "warn",
+      shortText: "Príliš ďaleko",
+      hint: "Príď bližšie ku kamere pre presné mikrovýrazy",
+      motionArtifact,
+      box: { minX, maxX, minY, maxY, cx, cy, w, h }
+    };
+  }
+
+  if (h > 0.86) {
+    return {
+      status: "warn",
+      shortText: "Príliš blízko",
+      hint: "Oddiaľ telefón, aby bola v zábere celá tvár",
+      motionArtifact,
+      box: { minX, maxX, minY, maxY, cx, cy, w, h }
+    };
+  }
+
+  if (motionArtifact) {
+    return {
+      status: "warn",
+      shortText: "Pohyb / úprava",
+      hint: "Zaznamenaný pohyb — FACS filter krátko potlačený",
+      motionArtifact: true,
+      box: { minX, maxX, minY, maxY, cx, cy, w, h }
+    };
+  }
+
+  return {
+    status: "ok",
+    shortText: "Tvár OK",
+    hint: "Celá tvár v obraze — snímanie stabilné",
+    motionArtifact: false,
+    box: { minX, maxX, minY, maxY, cx, cy, w, h }
+  };
+}
+
+function drawFramingGuide(targetCtx, width, height, status) {
+  const color = status === "ok" ? "#22c55e" : status === "warn" ? "#f59e0b" : "#f43f5e";
+  targetCtx.save();
+  targetCtx.strokeStyle = color;
+  targetCtx.lineWidth = Math.max(2, width * 0.004);
+  targetCtx.setLineDash([6, 4]);
+  targetCtx.beginPath();
+  targetCtx.ellipse(width / 2, height / 2, width * 0.27, height * 0.37, 0, 0, Math.PI * 2);
+  targetCtx.stroke();
+  targetCtx.restore();
+}
+
+function updateFramingUi(framing, nowPerf) {
+  const pillClass = framing.status === "ok" ? "online" : framing.status === "warn" ? "warn" : "danger";
+  framingPill.textContent = `Tvár: ${framing.shortText}`;
+  framingPill.className = `pill pill-right ${pillClass}`;
+
+  // Update Floating PiP HUD
+  pipHud.classList.remove("state-warn", "state-danger");
+  if (framing.status === "warn") pipHud.classList.add("state-warn");
+  if (framing.status === "danger") pipHud.classList.add("state-danger");
+
+  pipDot.className = `status-dot ${framing.status}`;
+  pipStatusText.textContent = framing.shortText;
+  pipGraphicHint.textContent = framing.shortText;
+
+  // Draw mini video thumbnail inside PiP (throttled to ~12 fps to save mobile CPU)
+  if (!pipMinimized && !pipHud.classList.contains("hidden") && nowPerf - lastPipDrawPerf > 80) {
+    lastPipDrawPerf = nowPerf;
     const pw = pipCanvas.width;
     const ph = pipCanvas.height;
-    const isFront = facingMode === "user";
+    pipCtx.clearRect(0, 0, pw, ph);
+
+    // Center-crop video into portrait PiP box
+    const vw = video.videoWidth || 640;
+    const vh = video.videoHeight || 480;
+    const targetAspect = pw / ph;
+    const srcAspect = vw / vh;
+    let sx = 0;
+    let sy = 0;
+    let sw = vw;
+    let sh = vh;
+    if (srcAspect > targetAspect) {
+      sw = vh * targetAspect;
+      sx = (vw - sw) / 2;
+    } else {
+      sh = vw / targetAspect;
+      sy = (vh - sh) / 2;
+    }
 
     pipCtx.save();
-    pipCtx.clearRect(0, 0, pw, ph);
-    if (isFront) {
+    if (facingMode === "user") {
       pipCtx.translate(pw, 0);
       pipCtx.scale(-1, 1);
     }
-    pipCtx.drawImage(video, 0, 0, pw, ph);
-
-    // Oval center guide
-    pipCtx.strokeStyle = "rgba(255, 255, 255, 0.35)";
-    pipCtx.lineWidth = 1;
-    pipCtx.beginPath();
-    pipCtx.ellipse(pw / 2, ph / 2, pw * 0.28, ph * 0.38, 0, 0, Math.PI * 2);
-    pipCtx.stroke();
-
-    // Detected face box
-    if (framingStatus.bbox) {
-      const b = framingStatus.bbox;
-      pipCtx.strokeStyle = boxColor;
-      pipCtx.lineWidth = 2;
-      pipCtx.strokeRect(b.minX * pw, b.minY * ph, b.width * pw, b.height * ph);
-    }
+    pipCtx.drawImage(video, sx, sy, sw, sh, 0, 0, pw, ph);
     pipCtx.restore();
+
+    drawFramingGuide(pipCtx, pw, ph, framing.status);
+  }
+
+  // Update inline strip during active question
+  if (activeStageId === "stageQuestion" && running) {
+    qTrackDot.className = `status-dot ${framing.status}`;
+    qTrackText.textContent = framing.hint;
+    qTrackGate.textContent = framing.motionArtifact ? "FACS filter: PAUZA" : "FACS: AKTÍVNE";
+  }
+
+  // Update ready checklist live
+  if (activeStageId === "stageReady") {
+    refreshReadyChecklist();
   }
 }
 
-function extractForeheadRppgAndLight(landmarks, nowMs) {
+function extractForeheadRppgAndLight(landmarks, nowMs, allowRppgSample) {
   const pt = landmarks[151];
   if (!pt || video.videoWidth === 0) return;
 
@@ -504,7 +529,8 @@ function extractForeheadRppgAndLight(landmarks, nowMs) {
     }
   }
 
-  if (framingStatus.code !== "ok") return;
+  // Gate rPPG during rapid head movement to avoid motion-induced fake heartbeats
+  if (!allowRppgSample) return;
 
   rppgBuffer.push({ t: nowMs, g: gMean });
   while (rppgBuffer.length > 0 && nowMs - rppgBuffer[0].t > RPPG_WINDOW_MS) {
@@ -555,6 +581,8 @@ function extractForeheadRppgAndLight(landmarks, nowMs) {
 function processLoop() {
   if (!running) return;
   const nowPerf = performance.now();
+  const dtMs = Math.min(250, Math.max(0, nowPerf - lastFramePerf));
+  lastFramePerf = nowPerf;
   const nowEpoch = Date.now();
 
   frameCount++;
@@ -564,53 +592,86 @@ function processLoop() {
     lastFpsStamp = nowPerf;
   }
 
-  if (video.currentTime !== lastVideoTime && faceLandmarker) {
+  if (
+    video.readyState >= 2 &&
+    video.videoWidth > 0 &&
+    video.currentTime !== lastVideoTime &&
+    faceLandmarker
+  ) {
     lastVideoTime = video.currentTime;
-    const result = faceLandmarker.detectForVideo(video, nowPerf);
-    const lm = result.faceLandmarks && result.faceLandmarks.length > 0 ? result.faceLandmarks[0] : null;
+    const detectTs = Math.max(Math.floor(nowPerf), lastDetectTimestampMs + 1);
+    lastDetectTimestampMs = detectTs;
 
-    evaluateFaceFraming(lm, nowEpoch);
-    drawOverlays(lm);
+    try {
+      const result = faceLandmarker.detectForVideo(video, detectTs);
+      ctx.clearRect(0, 0, overlay.width, overlay.height);
 
-    if (lm) {
-      extractForeheadRppgAndLight(lm, nowPerf);
+    const landmarks = result.faceLandmarks && result.faceLandmarks.length > 0 ? result.faceLandmarks[0] : null;
+    currentFraming = evaluateFaceFraming(landmarks, nowPerf);
+
+    drawFramingGuide(ctx, overlay.width, overlay.height, currentFraming.status);
+
+    if (landmarks) {
+      const forehead = landmarks[151];
+      ctx.strokeStyle = currentFraming.motionArtifact ? "#f59e0b" : "#38bdf8";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(
+        forehead.x * overlay.width - 18,
+        forehead.y * overlay.height - 14,
+        36,
+        28
+      );
+      extractForeheadRppgAndLight(landmarks, nowPerf, currentFraming.status === "ok" && !currentFraming.motionArtifact);
+    }
+
+    updateFramingUi(currentFraming, nowPerf);
+
+    // Track per-question quality metrics (without manipulating raw stopwatch!)
+    if (activeStageId === "stageQuestion") {
+      qTrackStats.totalFrames++;
+      if (currentFraming.status === "ok" && !currentFraming.motionArtifact) {
+        qTrackStats.validFrames++;
+      } else {
+        if (currentFraming.status === "danger") qTrackStats.outOfFrameMs += dtMs;
+        if (currentFraming.motionArtifact) qTrackStats.motionArtifactFrames++;
+      }
     }
 
     if (result.faceBlendshapes && result.faceBlendshapes.length > 0) {
       const categories = result.faceBlendshapes[0].categories;
       const map = Object.fromEntries(categories.map((c) => [c.categoryName, c.score]));
-      handleBlendshapes(map, nowEpoch);
-    } else if (calibrating) {
-      calFramingWarn.classList.remove("hidden");
-      calLastTickMs = nowEpoch;
+      handleBlendshapes(map, nowEpoch, dtMs);
+      } else if (calibrating) {
+        calGuardBanner.textContent = "Tvár chýba v obraze — kalibrácia pozastavená. Vráť sa do oválu.";
+        calGuardBanner.className = "guard-banner danger";
+      }
+    } catch (detectErr) {
+      log(`WARN: Frame detect chyba: ${detectErr.message}`);
     }
   }
 
   rafId = requestAnimationFrame(processLoop);
 }
 
-function handleBlendshapes(map, nowEpoch) {
-  const stableFrame = framingStatus.code === "ok" && nowEpoch >= settleUntilMs;
-
+function handleBlendshapes(map, nowEpoch, dtMs) {
   if (calibrating) {
-    const dt = Math.min(250, Math.max(0, nowEpoch - calLastTickMs));
-    calLastTickMs = nowEpoch;
-
-    if (stableFrame) {
-      calFramingWarn.classList.add("hidden");
-      calValidMs += dt;
+    if (currentFraming.status === "ok" && !currentFraming.motionArtifact) {
+      calAccumulatedMs += dtMs;
+      calGuardBanner.textContent = "Tvár v obraze — zbieram čistý neutrálny základ...";
+      calGuardBanner.className = "guard-banner ok";
       for (const s of TRACKED_SHAPES) {
         calSamples[s.key].push(map[s.key] || 0);
       }
     } else {
-      calFramingWarn.classList.remove("hidden");
+      calGuardBanner.textContent = `Kalibrácia pozastavená: ${currentFraming.hint}`;
+      calGuardBanner.className = `guard-banner ${currentFraming.status === "warn" ? "warn" : "danger"}`;
     }
 
-    const pct = Math.min(100, (calValidMs / CAL_DURATION_MS) * 100);
+    const pct = Math.min(100, (calAccumulatedMs / CAL_DURATION_MS) * 100);
     document.getElementById("calProgress").style.width = `${pct}%`;
-    document.getElementById("calCounter").textContent = `${(calValidMs / 1000).toFixed(1)} / 10.0 s`;
+    document.getElementById("calCounter").textContent = `${(calAccumulatedMs / 1000).toFixed(1)} / 10.0 s`;
 
-    if (calValidMs >= CAL_DURATION_MS) {
+    if (calAccumulatedMs >= CAL_DURATION_MS) {
       finishCalibration();
     }
   }
@@ -628,7 +689,7 @@ function handleBlendshapes(map, nowEpoch) {
       const z = (val - mean) / Math.max(std, 0.015);
       const clampedPct = Math.min(100, Math.max(0, (Math.abs(z) / 5) * 100));
       bar.style.width = `${clampedPct}%`;
-      bar.classList.toggle("spike", stableFrame && z >= 2.2);
+      bar.classList.toggle("spike", z >= 2.2 && !currentFraming.motionArtifact);
       valEl.textContent = `${z.toFixed(1)}σ`;
 
       if (z > maxZ) {
@@ -644,35 +705,57 @@ function handleBlendshapes(map, nowEpoch) {
 
   mZscore.textContent = `${maxZ.toFixed(2)} σ`;
 
-  // Gate FACS spike capture: ignore spikes during out-of-frame / 450ms settle window
-  if (
-    baselineStats &&
-    stableFrame &&
-    document.getElementById("stageQuestion").classList.contains("active") &&
-    maxZ >= 2.2
-  ) {
-    const lastSpike = sessionData.microexpression_spikes[sessionData.microexpression_spikes.length - 1];
-    if (!lastSpike || nowEpoch - lastSpike.timestamp_ms > 250) {
-      sessionData.microexpression_spikes.push({
-        timestamp_ms: nowEpoch,
-        question_id: currentNodeId,
-        blendshape: maxKey,
-        z_score: Number(maxZ.toFixed(2))
-      });
+  // Record FACS spike ONLY when face framing is clean (rejects phone-repositioning artifacts!)
+  if (baselineStats && activeStageId === "stageQuestion" && maxZ >= 2.2) {
+    if (currentFraming.status !== "ok" || currentFraming.motionArtifact) {
+      qTrackStats.suppressedSpikes++;
+    } else {
+      const lastSpike = sessionData.microexpression_spikes[sessionData.microexpression_spikes.length - 1];
+      if (!lastSpike || nowEpoch - lastSpike.timestamp_ms > 250) {
+        sessionData.microexpression_spikes.push({
+          timestamp_ms: nowEpoch,
+          question_id: currentNodeId,
+          blendshape: maxKey,
+          z_score: Number(maxZ.toFixed(2))
+        });
+      }
     }
   }
 }
 
+function refreshReadyChecklist() {
+  if (running) {
+    readyModeLabel.textContent = `Kamera (${facingMode === "user" ? "Predná" : "Zadná"}) + MediaPipe`;
+    readyModeLabel.className = "text-ok";
+    readyCalLabel.textContent = baselineStats ? "Hotová (Baseline aktívna)" : "Bez kalibrácie";
+    readyCalLabel.className = baselineStats ? "text-ok" : "text-warn";
+    readyFramingLabel.textContent = currentFraming.hint;
+    readyFramingLabel.className =
+      currentFraming.status === "ok"
+        ? "text-ok"
+        : currentFraming.status === "warn"
+          ? "text-warn"
+          : "text-danger";
+    btnRecalibrate.classList.remove("hidden");
+  } else {
+    readyModeLabel.textContent = "Bez kamery (len latencia a psychológia)";
+    readyModeLabel.className = "text-warn";
+    readyCalLabel.textContent = "Preskočená";
+    readyCalLabel.className = "";
+    readyFramingLabel.textContent = "Kamera neaktívna";
+    readyFramingLabel.className = "";
+    btnRecalibrate.classList.add("hidden");
+  }
+}
+
 function startCalibration() {
-  currentTier = "tier1_web_mediapipe";
   for (const s of TRACKED_SHAPES) calSamples[s.key] = [];
   calibrating = true;
-  calValidMs = 0;
-  calLastTickMs = Date.now();
+  calAccumulatedMs = 0;
+  selectedTier = "tier1_web_mediapipe";
   mBaseline.textContent = "Baseline: Prebieha...";
-  calFramingWarn.classList.add("hidden");
   showStage("stageCalibration");
-  log("Spustená 10s Baseline kalibrácia (zber len pri stabilnom zábere tváre).");
+  log("Spustená 10s Baseline kalibrácia (s ochranou polohy tváre).");
 }
 
 function finishCalibration() {
@@ -685,43 +768,29 @@ function finishCalibration() {
     baselineStats[s.key] = { mean, std: Math.sqrt(variance) };
   }
   mBaseline.textContent = "Baseline: Hotová";
-  log("Kalibrácia dokončená. Čakám na výber testu a manuálny ŠTART.");
-  openReadyStage(true);
+  log("Kalibrácia hotová. Čakám na potvrdenie ŠTART TESTU používateľom.");
+  openReadyScreen();
 }
 
-function openReadyStage(withCamera) {
-  currentTier = withCamera && running ? "tier1_web_mediapipe" : "tier0_text_latency_only";
-  if (withCamera && baselineStats) {
-    readyCalBadge.textContent = "Baseline kalibrácia: HOTOVÁ";
-    btnRecalibrate.classList.remove("hidden");
-  } else {
-    readyCalBadge.textContent = "Režim bez kamery (latencia + psychológia)";
-    btnRecalibrate.classList.add("hidden");
-  }
+function openReadyScreen() {
+  refreshReadyChecklist();
   showStage("stageReady");
-  setFramingStatus(framingStatus.code, framingStatus.label, framingStatus.cssClass, framingStatus.bbox);
 }
 
-function startSelectedTest() {
-  const preset = getSelectedPreset();
-  activePresetId = preset.id;
-  maxSteps = preset.maxSteps;
+function beginTestFromReady() {
+  maxSteps = getSelectedDepth();
+  selectedTier = running ? "tier1_web_mediapipe" : "tier0_text_latency_only";
   sessionData = createEmptySession();
-  sessionData.tier = running && baselineStats ? "tier1_web_mediapipe" : "tier0_text_latency_only";
   sessionData.baseline_calibrated = Boolean(baselineStats && running);
-  sessionData.meta.preset_id = preset.id;
-  sessionData.meta.selected_depth = preset.maxSteps;
-  sessionData.meta.pause_on_reposition = chkPauseOnReposition.checked;
-
   visitedIds = new Set();
-  domainScores = { ...preset.initialDomainScores };
+  domainScores = createEmptyDomainScores();
   auditTrail = [];
   currentStep = 0;
-  currentNodeId = preset.startNodeId;
+  currentNodeId = "n01_entry";
   oracleWhisper.classList.add("hidden");
   oracleWhisperText.textContent = "";
 
-  log(`ŠTART testu "${preset.title}" (${preset.maxSteps} krokov, štart=${preset.startNodeId}).`);
+  log(`ŠTART TESTU (${maxSteps} krokov, režim: ${selectedTier}). Časovač 1. otázky spustený.`);
   showStage("stageQuestion");
   renderNode(currentNodeId, null);
 }
@@ -735,9 +804,14 @@ function findStrongestBiometricEvent() {
       detail: `mikrovýraz (${topSpike.blendshape}, ${topSpike.z_score}σ)`
     };
   }
-  if (sessionData.questions.length >= 3) {
-    const sorted = [...sessionData.questions].sort((a, b) => b.latency_ms - a.latency_ms);
-    const avg = sessionData.questions.reduce((s, q) => s + q.latency_ms, 0) / sessionData.questions.length;
+  // Ignore questions where user spent >800ms repositioning phone out of frame
+  const cleanQuestions = sessionData.questions.filter((q) => {
+    const qual = sessionData.meta.question_quality[q.question_id];
+    return !qual || qual.out_of_frame_ms <= 800;
+  });
+  if (cleanQuestions.length >= 3) {
+    const sorted = [...cleanQuestions].sort((a, b) => b.latency_ms - a.latency_ms);
+    const avg = cleanQuestions.reduce((s, q) => s + q.latency_ms, 0) / cleanQuestions.length;
     if (sorted[0].latency_ms > avg * 1.25 && sorted[0].latency_ms >= 2200) {
       return {
         type: "latency",
@@ -759,6 +833,7 @@ function renderNode(nodeId, previousReaction) {
   currentNodeId = nodeId;
   visitedIds.add(nodeId);
   currentStep++;
+  qTrackStats = createEmptyQuestionTrackStats();
 
   document.getElementById("qStep").textContent = `KROK ${currentStep} / ${maxSteps}`;
 
@@ -792,37 +867,11 @@ function renderNode(nodeId, previousReaction) {
 
   const optsEl = document.getElementById("qOptions");
   optsEl.innerHTML = "";
-
   qDisplayedAtMs = Date.now();
-  qLastTimerTickMs = qDisplayedAtMs;
-  qRepositionMs = 0;
 
   if (qTimerInterval) clearInterval(qTimerInterval);
   qTimerInterval = setInterval(() => {
-    const now = Date.now();
-    const dt = now - qLastTimerTickMs;
-    qLastTimerTickMs = now;
-
-    const pauseEnabled = chkPauseOnReposition.checked;
-    const reposNow = isRepositioningNow(now);
-
-    if (reposNow) {
-      qRepositionMs += dt;
-    }
-
-    qFramingBanner.classList.toggle("hidden", !(running && reposNow));
-
-    const rawElapsed = now - qDisplayedAtMs;
-    const cleanElapsed = pauseEnabled ? Math.max(0, Math.round(rawElapsed - qRepositionMs)) : rawElapsed;
-
-    const qTimerEl = document.getElementById("qTimer");
-    if (running && reposNow && pauseEnabled) {
-      qTimerEl.textContent = `${cleanElapsed} ms (pozastavené)`;
-      qTimerEl.className = "mono text-warn";
-    } else {
-      qTimerEl.textContent = `${cleanElapsed} ms`;
-      qTimerEl.className = "mono";
-    }
+    document.getElementById("qTimer").textContent = `${Date.now() - qDisplayedAtMs} ms`;
   }, 50);
 
   for (const opt of node.options) {
@@ -836,10 +885,7 @@ function renderNode(nodeId, previousReaction) {
 
 function selectAnswer(node, opt) {
   const answeredAtMs = Date.now();
-  const rawLatencyMs = answeredAtMs - qDisplayedAtMs;
-  const repoMs = Math.round(qRepositionMs);
-  const pauseEnabled = chkPauseOnReposition.checked;
-  const effectiveLatencyMs = pauseEnabled ? Math.max(0, rawLatencyMs - repoMs) : rawLatencyMs;
+  const latencyMs = answeredAtMs - qDisplayedAtMs;
 
   if (opt.domainBoost) {
     for (const [dom, weight] of Object.entries(opt.domainBoost)) {
@@ -847,13 +893,22 @@ function selectAnswer(node, opt) {
     }
   }
 
+  const qualityPct =
+    running && qTrackStats.totalFrames > 0
+      ? Math.round((qTrackStats.validFrames / qTrackStats.totalFrames) * 100)
+      : null;
+
+  sessionData.meta.question_quality[node.id] = {
+    tracking_quality_pct: qualityPct,
+    out_of_frame_ms: Math.round(qTrackStats.outOfFrameMs),
+    suppressed_motion_spikes: qTrackStats.suppressedSpikes
+  };
+
   sessionData.questions.push({
     question_id: node.id,
     displayed_at_ms: qDisplayedAtMs,
     answered_at_ms: answeredAtMs,
-    latency_ms: effectiveLatencyMs,
-    raw_latency_ms: rawLatencyMs,
-    reposition_ms: repoMs,
+    latency_ms: latencyMs,
     answer_code: opt.code,
     trait: opt.trait
   });
@@ -863,16 +918,16 @@ function selectAnswer(node, opt) {
     question_id: node.id,
     question_text: node.text,
     chosen_label: opt.label,
-    latency_ms: effectiveLatencyMs,
-    reposition_ms: repoMs,
+    latency_ms: latencyMs,
+    quality_pct: qualityPct,
+    out_of_frame_ms: Math.round(qTrackStats.outOfFrameMs),
+    suppressed_spikes: qTrackStats.suppressedSpikes,
     oracle_reaction: opt.oracleReaction,
     technique: opt.technique,
     debunk: opt.debunkExplanation
   });
 
-  log(
-    `Krok ${currentStep} [${node.id}] -> ${opt.code} (čistý ${effectiveLatencyMs} ms, úprava polohy ${repoMs} ms)`
-  );
+  log(`Krok ${currentStep} [${node.id}] -> ${opt.code} (${latencyMs} ms | kvalita: ${qualityPct ?? "N/A"}%)`);
 
   const nextId = resolveNextNodeId({
     currentOption: opt,
@@ -892,7 +947,6 @@ function selectAnswer(node, opt) {
 
 function finishSession() {
   if (qTimerInterval) clearInterval(qTimerInterval);
-  qFramingBanner.classList.add("hidden");
   const { primary, secondary } = rankDomains(domainScores);
   sessionData.meta.primary_domain = primary;
   sessionData.meta.secondary_domain = secondary;
@@ -908,7 +962,6 @@ function buildResults(primaryKey, secondaryKey) {
   const avgLatency = Math.round(
     sessionData.questions.reduce((a, b) => a + b.latency_ms, 0) / Math.max(sessionData.questions.length, 1)
   );
-  const totalRepoMs = sessionData.questions.reduce((a, b) => a + (b.reposition_ms || 0), 0);
   const slowest = [...sessionData.questions].sort((a, b) => b.latency_ms - a.latency_ms)[0];
   const bioEvent = findStrongestBiometricEvent();
 
@@ -919,7 +972,7 @@ function buildResults(primaryKey, secondaryKey) {
     bioEvent
       ? `<p>Navyše bolo zreteľne cítiť jemné vnútorné napätie v momente, keď sme sa priblížili k jadru problému (${escapeHtml(bioEvent.detail)}). Presne tam sa skrýva vec, ktorú už vnútorne poznáš, ale odkladáš jej vyslovenie nahlas.</p>`
       : `<p>Rytmus tvojich reakcií ukázal jasné zaváhanie presne tam, kde rozum bojuje s emóciou. Odpoveď na tvoju dilemu už v sebe dávno nosíš — zlom príde v najbližších mesiacoch v momente, keď prestaneš robiť kompromis sám proti sebe.</p>`,
-    `<div class="debunk-card info"><strong>Zastav sa na 5 sekúnd:</strong> Ak si mal pri čítaní pocit, že to znie prekvapivo presne, klikni hore na červené tlačidlo <strong>FLIP MODE: Pitva trikov</strong> a pozri si, ako ľahko ťa práve naprogramoval obyčajný strom podmienok.</div>`
+    `<div class="debunk-card info"><strong>Zastav sa na 5 sekúnd:</strong> Ak si mal pri čítaní pocit, že to znie prekvapivo presne, klikni hore na červené tlačidlo <strong>FLIP MODE: Pitva trikov</strong> a pozri si presnú analýzu.</div>`
   ];
   document.getElementById("resultOracle").innerHTML = oracleHtml.join("");
 
@@ -931,15 +984,19 @@ function buildResults(primaryKey, secondaryKey) {
   const auditHtml = auditTrail
     .map((item) => {
       const spCount = spikesByQ[item.question_id] || 0;
-      const spikeBadge = spCount > 0 ? ` | FACS špičky: ${spCount}` : "";
-      const repoBadge = item.reposition_ms > 200 ? ` | mimo záber: ${item.reposition_ms} ms` : "";
+      const qualBadge = item.quality_pct !== null ? ` | Sledovanie: ${item.quality_pct}%` : "";
+      const spikeBadge = spCount > 0 ? ` | FACS: ${spCount}` : "";
+      const motionNote =
+        item.suppressed_spikes > 0
+          ? ` (odfiltrované pohybové artefakty: ${item.suppressed_spikes})`
+          : "";
       return `
         <div class="audit-item">
           <div class="audit-head">
-            <strong>Krok ${item.step} (čistý čas ${item.latency_ms} ms${repoBadge}${spikeBadge})</strong>
+            <strong>Krok ${item.step} (${item.latency_ms} ms${qualBadge}${spikeBadge})</strong>
             <span class="tech-tag">${escapeHtml(item.technique)}</span>
           </div>
-          <p class="audit-choice"><strong>Tvoja voľba:</strong> ${escapeHtml(item.chosen_label)}</p>
+          <p class="audit-choice"><strong>Tvoja voľba:</strong> ${escapeHtml(item.chosen_label)}${escapeHtml(motionNote)}</p>
           <p class="audit-oracle"><strong>Čo povedala „veštica“:</strong> „${escapeHtml(item.oracle_reaction)}“</p>
           <p class="audit-debunk"><strong>Ako fungoval trik:</strong> ${escapeHtml(item.debunk)}</p>
         </div>
@@ -951,17 +1008,16 @@ function buildResults(primaryKey, secondaryKey) {
     `<h3>FLIP MODE: Vedecká pitva celého rozhovoru (Žiadna mágia)</h3>`,
     `<div class="debunk-card">
       <strong>1. Ako „vedela“, že riešiš ${escapeHtml(primary.label.toLowerCase())}?</strong><br />
-      Nevytiahla to z kariet ani z energie. Tvoje kliknutia pridelili oblasti <em>${escapeHtml(primary.label)}</em> najvyššiu váhu (skóre: <code>${JSON.stringify(domainScores)}</code>) a presmerovali rozhovor do pripravenej vetvy z 30-uzlového scenára.
+      Nevytiahla to z kariet ani z energie. Už tvoje prvé kliknutie pridelilo oblasti <em>${escapeHtml(primary.label)}</em> najvyššiu váhu (skóre: <code>${JSON.stringify(domainScores)}</code>) a presmerovalo rozhovor do pripravenej vetvy z 30-uzlového scenára.
     </div>`,
     `<div class="debunk-card ok">
-      <strong>2. Čistá kognitívna záťaž a biometria:</strong><br />
-      Priemerný čistý čas odpovede: <strong>${avgLatency} ms</strong> (odfiltrovaný čas úpravy polohy: <strong>${totalRepoMs} ms</strong>).
-      Najdlhšie váhanie nastalo pri kroku <code>${slowest ? slowest.question_id : "-"}</code> (<strong>${slowest ? slowest.latency_ms : 0} ms</strong>).
-      Zachytené FACS mikrovýrazy nad 2.2σ (iba pri stabilnej tvári): <strong>${sessionData.microexpression_spikes.length}</strong> (<code>${JSON.stringify(spikesByQ)}</code>). Video neopustilo tvoje zariadenie.
+      <strong>2. Kognitívna záťaž a kvalita snímania:</strong><br />
+      Priemerný čas odpovede: <strong>${avgLatency} ms</strong>. Najdlhšie váhanie nastalo pri kroku <code>${slowest ? slowest.question_id : "-"}</code> (<strong>${slowest ? slowest.latency_ms : 0} ms</strong>).
+      Čisté FACS mikrovýrazy nad 2.2σ (po odfiltrovaní pohybov hlavy): <strong>${sessionData.microexpression_spikes.length}</strong> (<code>${JSON.stringify(spikesByQ)}</code>). Video neopustilo tvoje zariadenie.
     </div>`,
     `<div class="debunk-card info">
       <strong>3. Psychologický náznak (Schémová terapia Jeffreyho Younga):</strong><br />
-      Tvoje odpovede naznačujú najčastejšie témy v oblasti: <strong>${escapeHtml(primary.schemaHint)}</strong>. Namiesto veštice sa s týmito vzorcami pracuje vedecky cez kognitívny reframing a pomenovanie vlastných hraníc.
+      Tvoje odpovede naznačujú najčastejšie témy v oblasti: <strong>${escapeHtml(primary.schemaHint)}</strong>.
     </div>`,
     `<h4 style="margin: 16px 0 6px 0;">Krok za krokom — každá technika použitá proti tebe:</h4>`,
     auditHtml
@@ -982,27 +1038,20 @@ btnToggleCam.addEventListener("click", () => {
 
 btnCalibrate.addEventListener("click", startCalibration);
 
-btnCancelCal.addEventListener("click", () => {
-  calibrating = false;
-  mBaseline.textContent = baselineStats ? "Baseline: Hotová" : "Baseline: Neaktívna";
-  showStage("stageIntro");
-});
-
 btnSkipCam.addEventListener("click", () => {
-  openReadyStage(false);
+  selectedTier = "tier0_text_latency_only";
+  openReadyScreen();
 });
 
-btnStartTest.addEventListener("click", startSelectedTest);
+btnStartTest.addEventListener("click", beginTestFromReady);
+btnRecalibrate.addEventListener("click", startCalibration);
+btnBackIntro.addEventListener("click", () => showStage("stageIntro"));
 
-btnRecalibrate.addEventListener("click", () => {
-  if (running) startCalibration();
-  else showStage("stageIntro");
-});
-
-btnPipMode.addEventListener("click", () => {
-  pipCompact = !pipCompact;
-  pipHud.classList.toggle("compact", pipCompact);
-  btnPipMode.textContent = pipCompact ? "Obraz" : "Mini";
+btnPipToggle.addEventListener("click", () => {
+  pipMinimized = !pipMinimized;
+  pipVideoBox.classList.toggle("hidden", pipMinimized);
+  pipGraphicBox.classList.toggle("hidden", !pipMinimized);
+  btnPipToggle.textContent = pipMinimized ? "Vid" : "Min";
 });
 
 document.getElementById("btnModeOracle").addEventListener("click", () => {
@@ -1025,14 +1074,16 @@ document.getElementById("btnExportJson").addEventListener("click", () => {
 
 document.getElementById("btnRestart").addEventListener("click", () => {
   if (qTimerInterval) clearInterval(qTimerInterval);
-  openReadyStage(running && Boolean(baselineStats));
+  openReadyScreen();
 });
 
-document.getElementById("btnBackIntro").addEventListener("click", () => {
-  if (qTimerInterval) clearInterval(qTimerInterval);
-  showStage("stageIntro");
+window.addEventListener("error", (ev) => {
+  log(`RUNTIME CHYBA: ${ev.message}`);
+});
+window.addEventListener("unhandledrejection", (ev) => {
+  const reason = ev.reason && ev.reason.message ? ev.reason.message : String(ev.reason);
+  log(`ASYNC CHYBA: ${reason}`);
 });
 
 initBars();
-initPresets();
-log(`The Mirror v3 pripravený (${getTotalNodeCount()} uzlov, Pre-Start obrazovka + PiP Face-Lock HUD).`);
+log(`The Mirror v2.3 pripravený (${getTotalNodeCount()} uzlov + opravený štart + GPU/CPU fallback).`);
