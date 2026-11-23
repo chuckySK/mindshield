@@ -1,0 +1,24 @@
+﻿# Tajne kluce a konfiguracia (NIKDY neposielat do verejneho repozitara)
+.env
+.env.*
+*.pem
+*.key
+*.jks
+*.keystore
+secrets/
+
+# Python a Docker
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Android a IDE
+.gradle/
+build/
+local.properties
+.idea/
+.vscode/
+*.log
+.DS_Store
+Thumbs.db
