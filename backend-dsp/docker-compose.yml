@@ -1,9 +1,0 @@
-services:
-  mindshield-dsp:
-    build: .
-    container_name: mindshield-dsp
-    restart: unless-stopped
-    ports:
-      - "8000:8000"
-    environment:
-      - LOG_LEVEL=INFO
